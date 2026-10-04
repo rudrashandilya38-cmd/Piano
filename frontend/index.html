@@ -1,0 +1,150 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>🎸 Gesture Guitar — Play Chords with Hand Gestures</title>
+  <meta name="description" content="Play real-time acoustic guitar chords using your webcam hand gestures or voice commands on desktop and mobile browsers.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- Top Header Navigation -->
+  <header class="app-header">
+    <div class="logo">
+      <span class="logo-icon">🎸</span>
+      <h1>Gesture Guitar</h1>
+      <span class="version-badge">Mobile &amp; Web</span>
+    </div>
+    <div class="header-controls">
+      <button id="btn-camera-flip" class="icon-button" title="Flip Camera" aria-label="Flip Camera">
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 19H4a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5"/><path d="M13 5h7a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2h-5"/><polyline points="16 2 20 6 16 10"/><polyline points="8 14 4 18 8 22"/></svg>
+      </button>
+      <button id="btn-voice" class="pill-button" title="Toggle Voice Commands">
+        <span class="voice-dot"></span>
+        <span id="voice-label">Voice Off</span>
+      </button>
+      <!-- START CAMERA — always on top, pointer-events always active -->
+      <button id="btn-start-camera" class="btn-primary" type="button">
+        <span>Start Camera</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="app-main">
+    
+    <!-- Video / Canvas Stage Container -->
+    <div class="stage-container">
+      <video id="webcam" playsinline autoplay muted></video>
+      <canvas id="output-canvas"></canvas>
+
+      <!-- Glass Overlay HUD Top Bar -->
+      <div class="hud-top-bar">
+        <div class="finger-indicators">
+          <div class="finger-pill" id="pill-thumb" data-finger="T">T</div>
+          <div class="finger-pill" id="pill-index" data-finger="I">I</div>
+          <div class="finger-pill" id="pill-middle" data-finger="M">M</div>
+          <div class="finger-pill" id="pill-ring" data-finger="R">R</div>
+          <div class="finger-pill" id="pill-pinky" data-finger="P">P</div>
+        </div>
+
+        <div class="active-chord-badge" id="chord-badge">
+          <span class="chord-label-sub">CURRENT CHORD</span>
+          <span class="chord-label-main" id="chord-display-name">Mute</span>
+          <span class="chord-count-pill" id="finger-count-pill">0 Fingers</span>
+        </div>
+      </div>
+
+      <!-- Animated Guitar Fretboard Strings Overlay at Bottom of Stage -->
+      <div class="strings-visualizer-container">
+        <canvas id="strings-canvas"></canvas>
+      </div>
+
+      <!-- Loading Splash Overlay inside Stage -->
+      <div id="loading-overlay" class="stage-overlay">
+        <div class="spinner"></div>
+        <p id="loading-text">Synthesizing Nylon-String Guitar Chords &amp; Loading AI Task Model...</p>
+      </div>
+
+      <!-- Camera Start Prompt inside Stage when inactive -->
+      <!-- FIXED: starts hidden; only shown after model is ready -->
+      <div id="camera-prompt" class="stage-overlay hidden">
+        <div class="prompt-icon">📷</div>
+        <h2>Allow Camera Access</h2>
+        <p>Hold up 1 to 5 fingers in front of your front camera to play guitar chords in real-time!</p>
+        <button id="btn-start-prompt" class="btn-primary btn-large" type="button">Tap to Enable Camera</button>
+      </div>
+    </div>
+
+    <!-- Interactive Touch Chord Deck / Mobile Control Panel -->
+    <section class="controls-panel">
+      <div class="panel-header">
+        <h2>Interactive Chord Deck</h2>
+        <span class="subtitle">Tap any chord or use hand gestures / voice</span>
+      </div>
+
+      <div class="chord-buttons-grid">
+        <button class="chord-btn" data-chord="1" data-name="Em" style="--chord-color: #ff5a5a;" type="button">
+          <span class="btn-fingers">1 Finger</span>
+          <span class="btn-chord-name">Em</span>
+          <span class="btn-full-name">E Minor</span>
+        </button>
+
+        <button class="chord-btn" data-chord="2" data-name="Am" style="--chord-color: #ffa53c;" type="button">
+          <span class="btn-fingers">2 Fingers</span>
+          <span class="btn-chord-name">Am</span>
+          <span class="btn-full-name">A Minor</span>
+        </button>
+
+        <button class="chord-btn" data-chord="3" data-name="C" style="--chord-color: #50dc78;" type="button">
+          <span class="btn-fingers">3 Fingers</span>
+          <span class="btn-chord-name">C</span>
+          <span class="btn-full-name">C Major</span>
+        </button>
+
+        <button class="chord-btn" data-chord="4" data-name="D" style="--chord-color: #50a0ff;" type="button">
+          <span class="btn-fingers">4 Fingers</span>
+          <span class="btn-chord-name">D</span>
+          <span class="btn-full-name">D Major</span>
+        </button>
+
+        <button class="chord-btn" data-chord="5" data-name="G" style="--chord-color: #c850ff;" type="button">
+          <span class="btn-fingers">5 Fingers</span>
+          <span class="btn-chord-name">G</span>
+          <span class="btn-full-name">G Major</span>
+        </button>
+
+        <button class="chord-btn mute-btn" data-chord="0" data-name="Mute" style="--chord-color: #8a99ad;" type="button">
+          <span class="btn-fingers">Fist (0)</span>
+          <span class="btn-chord-name">&#x270A; Mute</span>
+          <span class="btn-full-name">Silence</span>
+        </button>
+      </div>
+
+      <!-- Quick Guide Accordion / Help -->
+      <div class="guide-card">
+        <h3>&#x1F590; Hand Gesture Mapping</h3>
+        <div class="guide-table">
+          <div class="guide-row"><span class="g-fingers">&#x270A; Fist (0)</span><span class="g-chord">Mute</span><span class="g-voice">"stop" / "mute"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x261D; 1 Finger</span><span class="g-chord">Em (E Minor)</span><span class="g-voice">"e minor" / "1"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x270C; 2 Fingers</span><span class="g-chord">Am (A Minor)</span><span class="g-voice">"a minor" / "2"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F91F; 3 Fingers</span><span class="g-chord">C Major</span><span class="g-voice">"c major" / "3"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F596; 4 Fingers</span><span class="g-chord">D Major</span><span class="g-voice">"d major" / "4"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F590; 5 Fingers</span><span class="g-chord">G Major</span><span class="g-voice">"g major" / "5"</span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="app-footer">
+    <p>Gesture Guitar — Powered by MediaPipe Tasks Vision &amp; Web Audio API</p>
+  </footer>
+
+  <!-- Include Application JavaScript (Module) -->
+  <script type="module" src="app.js"></script>
+</body>
+</html>
