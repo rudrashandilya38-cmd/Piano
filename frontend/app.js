@@ -18,22 +18,25 @@
 import { HandLandmarker, FilesetResolver }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.15";
 
+const BACKEND_URL = "https://piano-1-s83z.onrender.com";
+
 // ═══════════════════════════════════════════════════════════════════════════
 // CHORD DATA
 // ═══════════════════════════════════════════════════════════════════════════
 const CHORD_CONFIG = {
-  0: { name: "Mute", full: "Silence",  color: "#8a99ad", freqs: [] },
+  0: { name: "Mute", full: "Silence",  color: "#8a99ad", freqs: [], file: null },
   1: { name: "Em",   full: "E Minor",  color: "#ff5a5a",
-       freqs: [82.41, 123.47, 164.81, 196.00, 246.94, 329.63] },
+       freqs: [82.41, 123.47, 164.81, 196.00, 246.94, 329.63], file: "guitar_em.wav" },
   2: { name: "Am",   full: "A Minor",  color: "#ffa53c",
-       freqs: [110.00, 164.81, 220.00, 261.63, 329.63] },
+       freqs: [110.00, 164.81, 220.00, 261.63, 329.63], file: "guitar_am.wav" },
   3: { name: "C",    full: "C Major",  color: "#50dc78",
-       freqs: [130.81, 164.81, 196.00, 261.63, 329.63] },
+       freqs: [130.81, 164.81, 196.00, 261.63, 329.63], file: "guitar_c.wav" },
   4: { name: "D",    full: "D Major",  color: "#50a0ff",
-       freqs: [146.83, 220.00, 293.66, 369.99] },
+       freqs: [146.83, 220.00, 293.66, 369.99], file: "guitar_d.wav" },
   5: { name: "G",    full: "G Major",  color: "#c850ff",
-       freqs: [98.00, 123.47, 196.00, 246.94, 329.63, 392.00] }
+       freqs: [98.00, 123.47, 196.00, 246.94, 329.63, 392.00], file: "guitar_g.wav" }
 };
+
 
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
@@ -99,9 +102,31 @@ document.addEventListener("DOMContentLoaded", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 // AUDIO
 // ═══════════════════════════════════════════════════════════════════════════
+const audioBuffers = {};
+let soundsPreloaded = false;
+
+async function preloadBackendSounds() {
+  if (soundsPreloaded || !audioCtx) return;
+  soundsPreloaded = true;
+  for (const [id, cfg] of Object.entries(CHORD_CONFIG)) {
+    if (!cfg.file) continue;
+    try {
+      const res = await fetch(`${BACKEND_URL}/api/sounds/${cfg.file}`);
+      if (res.ok) {
+        const arrayBuf = await res.arrayBuffer();
+        audioBuffers[id] = await audioCtx.decodeAudioData(arrayBuf);
+        console.log(`[Backend Sound] Preloaded ${cfg.name} from Render API`);
+      }
+    } catch (err) {
+      console.warn(`[Backend Sound] Fallback to synth for ${cfg.name}:`, err);
+    }
+  }
+}
+
 function ensureAudioCtx() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    preloadBackendSounds();
   }
   if (audioCtx.state === "suspended") audioCtx.resume();
 }
@@ -114,11 +139,24 @@ function playChord(chordId) {
 
   kickStrings();
 
-  const cfg       = CHORD_CONFIG[chordId];
+  const cfg = CHORD_CONFIG[chordId];
+  const now = audioCtx.currentTime;
+
+  // Use preloaded recorded WAV buffer from Render backend if available
+  if (audioBuffers[chordId]) {
+    const src = audioCtx.createBufferSource();
+    src.buffer = audioBuffers[chordId];
+    src.connect(audioCtx.destination);
+    src.start(now);
+    activeNodes.push({ osc: src });
+    return;
+  }
+
+
   const freqs     = cfg.freqs;
-  const now       = audioCtx.currentTime;
   const strumSpan = 0.055;
   const strumStep = strumSpan / Math.max(freqs.length - 1, 1);
+
 
   const harmonicAmps  = [1.00, 0.38, 0.16, 0.07, 0.03];
   const detuneCents   = [-2.0, 0.0, 2.0];
