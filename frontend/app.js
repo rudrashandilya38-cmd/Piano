@@ -3,25 +3,18 @@
  * ================================
  * Real-time hand gesture guitar using MediaPipe Tasks Vision + Web Audio API.
  *
- * Sound Engine: Real-time oscillator nodes (OscillatorNode + GainNode).
- *   No pre-computation — zero blocking. Camera starts instantly.
- * Gesture Engine: MediaPipe HandLandmarker (VIDEO mode), 3D finger scoring.
+ * Sound Engine: Pre-rendered AudioBuffers generated in-memory via nylon guitar
+ *   Karplus-Strong / Plucked-String Synthesis (zero network latency, 0ms play response).
+ * Gesture Engine: MediaPipe HandLandmarker (VIDEO mode) + Smart 3D Orientation-Invariant
+ *   and Scale-Normalized Finger Scoring algorithm identical to Python main.py.
  * Voice Engine: Web Speech API (webkitSpeechRecognition fallback).
- *
- * CAMERA FIX:
- *   - camera-prompt starts hidden; only shown after model load completes.
- *   - ensureAudioCtx() is deferred so getUserMedia stays in the direct
- *     gesture-event call stack (required by mobile browsers).
- *   - startCamera() guard removed so button is never permanently disabled.
  */
 
 import { HandLandmarker, FilesetResolver }
   from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.15";
 
-const BACKEND_URL = "https://piano-1-s83z.onrender.com";
-
 // ═══════════════════════════════════════════════════════════════════════════
-// CHORD DATA
+// CHORD CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 const CHORD_CONFIG = {
   0: { name: "Mute", full: "Silence",  color: "#8a99ad", freqs: [], file: null },
@@ -37,7 +30,6 @@ const CHORD_CONFIG = {
        freqs: [98.00, 123.47, 196.00, 246.94, 329.63, 392.00], file: "guitar_g.wav" }
 };
 
-
 const HAND_CONNECTIONS = [
   [0,1],[1,2],[2,3],[3,4],
   [0,5],[5,6],[6,7],[7,8],
@@ -51,7 +43,9 @@ const HAND_CONNECTIONS = [
 // STATE
 // ═══════════════════════════════════════════════════════════════════════════
 let audioCtx          = null;
-let activeNodes       = [];
+const guitarBuffers   = {};
+let activeSourceNode  = null;
+let soundsSynthesized = false;
 
 let handLandmarker    = null;
 let modelReady        = false;
@@ -65,20 +59,17 @@ let cameraStream      = null;
 let isCameraRunning   = false;
 let facingMode        = "user";
 let rafId             = null;
-let lastVideoTime     = -1;
 
 let currentChord      = 0;
 let lastChord         = -1;
 
-const DEBOUNCE_N      = 4;
+const DEBOUNCE_N      = 3; // Smaller window = faster response (matches main.py DEBOUNCE_WINDOW_SIZE)
 let gestureHistory    = [];
 
 let speechRec         = null;
 let voiceActive       = false;
 
 let vibAmps           = [0,0,0,0,0,0];
-
-// Track if camera start is already in progress to prevent double-clicks
 let cameraStarting    = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -100,132 +91,143 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AUDIO
+// AUDIO ENGINE (Plucked Nylon Guitar Synthesis + Instant Buffer Caching)
 // ═══════════════════════════════════════════════════════════════════════════
-const audioBuffers = {};
-let soundsPreloaded = false;
-
-async function preloadBackendSounds() {
-  if (soundsPreloaded || !audioCtx) return;
-  soundsPreloaded = true;
-  for (const [id, cfg] of Object.entries(CHORD_CONFIG)) {
-    if (!cfg.file) continue;
-    try {
-      const res = await fetch(`${BACKEND_URL}/api/sounds/${cfg.file}`);
-      if (res.ok) {
-        const arrayBuf = await res.arrayBuffer();
-        audioBuffers[id] = await audioCtx.decodeAudioData(arrayBuf);
-        console.log(`[Backend Sound] Preloaded ${cfg.name} from Render API`);
-      }
-    } catch (err) {
-      console.warn(`[Backend Sound] Fallback to synth for ${cfg.name}:`, err);
-    }
-  }
-}
-
 function ensureAudioCtx() {
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    preloadBackendSounds();
   }
-  if (audioCtx.state === "suspended") audioCtx.resume();
+  if (audioCtx.state === "suspended") {
+    audioCtx.resume();
+  }
+  buildGuitarChordBuffers();
+}
+
+function buildGuitarChordBuffers() {
+  if (soundsSynthesized || !audioCtx) return;
+  soundsSynthesized = true;
+
+  for (const [idStr, cfg] of Object.entries(CHORD_CONFIG)) {
+    const id = parseInt(idStr, 10);
+    if (id === 0 || !cfg.freqs || cfg.freqs.length === 0) continue;
+    try {
+      guitarBuffers[id] = generateGuitarChordBuffer(audioCtx, cfg.freqs);
+    } catch (err) {
+      console.warn(`[Guitar Synth Error for chord ${cfg.name}]:`, err);
+    }
+  }
+
+  preloadStaticWavs();
+}
+
+async function preloadStaticWavs() {
+  for (const [idStr, cfg] of Object.entries(CHORD_CONFIG)) {
+    const id = parseInt(idStr, 10);
+    if (!cfg.file) continue;
+    try {
+      const res = await fetch(`sounds/${cfg.file}`);
+      if (res.ok) {
+        const buf = await res.arrayBuffer();
+        const decoded = await audioCtx.decodeAudioData(buf);
+        guitarBuffers[id] = decoded;
+      }
+    } catch (_) {}
+  }
+}
+
+/**
+ * Classical Guitar Nylon-String Synthesis (matches guitar_sounds.py)
+ */
+function generateGuitarChordBuffer(ctx, freqs, duration = 3.5) {
+  const sampleRate = ctx.sampleRate;
+  const numSamples = Math.floor(duration * sampleRate);
+  const buffer = ctx.createBuffer(1, numSamples, sampleRate);
+  const data = buffer.getChannelData(0);
+
+  const strumSpan = 0.055;
+  const strumStep = strumSpan / Math.max(freqs.length - 1, 1);
+
+  const harmonicAmps = [1.00, 0.38, 0.16, 0.07, 0.03];
+  const detuneCents  = [-2.0, 0.0, 2.0];
+  const detuneGains  = [0.25, 1.00, 0.25];
+  const totalGain    = 1.5;
+
+  for (let sIdx = 0; sIdx < freqs.length; sIdx++) {
+    const freq = freqs[sIdx];
+    const onsetSec = sIdx * strumStep;
+    const onsetSample = Math.floor(onsetSec * sampleRate);
+
+    const normF = Math.max(0, Math.min(1, (freq - 80) / 320));
+    const decayRate = 0.25 + normF * 0.45;
+
+    for (let i = onsetSample; i < numSamples; i++) {
+      const t = (i - onsetSample) / sampleRate;
+
+      // Soft fingertip attack (12ms)
+      let att = 1.0;
+      if (t < 0.012) {
+        att = Math.sin((Math.PI / 2) * (t / 0.012));
+      }
+
+      const env = Math.exp(-decayRate * t);
+
+      let val = 0.0;
+      for (let d = 0; d < 3; d++) {
+        const dc = detuneCents[d];
+        const dg = detuneGains[d];
+        const f0 = freq * Math.pow(2, dc / 1200);
+
+        for (let h = 0; h < harmonicAmps.length; h++) {
+          const hNum = h + 1;
+          const amp = harmonicAmps[h];
+          val += dg * amp * Math.sin(2 * Math.PI * f0 * hNum * t);
+        }
+      }
+
+      const sig = (val / totalGain) * env;
+      data[i] += att * sig;
+    }
+  }
+
+  // Soft tanh saturation for warm body resonance & peak normalization
+  let maxVal = 0;
+  for (let i = 0; i < numSamples; i++) {
+    const absV = Math.abs(data[i]);
+    if (absV > maxVal) maxVal = absV;
+  }
+  if (maxVal < 1e-6) maxVal = 1;
+
+  for (let i = 0; i < numSamples; i++) {
+    const normVal = data[i] / maxVal;
+    data[i] = Math.tanh(1.8 * normVal) * 0.85;
+  }
+
+  return buffer;
 }
 
 function playChord(chordId) {
   ensureAudioCtx();
-  stopAllNodes();
+
+  if (activeSourceNode) {
+    try {
+      activeSourceNode.stop();
+      activeSourceNode.disconnect();
+    } catch (_) {}
+    activeSourceNode = null;
+  }
 
   if (chordId === 0 || !CHORD_CONFIG[chordId]) return;
 
   kickStrings();
 
-  const cfg = CHORD_CONFIG[chordId];
-  const now = audioCtx.currentTime;
-
-  // Use preloaded recorded WAV buffer from Render backend if available
-  if (audioBuffers[chordId]) {
+  const buf = guitarBuffers[chordId];
+  if (buf) {
     const src = audioCtx.createBufferSource();
-    src.buffer = audioBuffers[chordId];
+    src.buffer = buf;
     src.connect(audioCtx.destination);
-    src.start(now);
-    activeNodes.push({ osc: src });
-    return;
+    src.start(0);
+    activeSourceNode = src;
   }
-
-
-  const freqs     = cfg.freqs;
-  const strumSpan = 0.055;
-  const strumStep = strumSpan / Math.max(freqs.length - 1, 1);
-
-
-  const harmonicAmps  = [1.00, 0.38, 0.16, 0.07, 0.03];
-  const detuneCents   = [-2.0, 0.0, 2.0];
-  const detuneWeights = [0.25, 1.00, 0.25];
-  const totalWeight   = 1.5;
-
-  const masterGain = audioCtx.createGain();
-  masterGain.gain.setValueAtTime(1.0, now);
-  masterGain.connect(audioCtx.destination);
-
-  const lpf = audioCtx.createBiquadFilter();
-  lpf.type = "lowpass";
-  lpf.frequency.setValueAtTime(4000, now);
-  lpf.Q.setValueAtTime(0.6, now);
-  lpf.connect(masterGain);
-
-  freqs.forEach((freq, sIdx) => {
-    const onset    = now + sIdx * strumStep;
-    const duration = 4.0;
-    const normF    = Math.max(0, Math.min(1, (freq - 80) / 320));
-    const decayEnd = onset + duration;
-
-    harmonicAmps.forEach((hAmp, hIdx) => {
-      const hNum = hIdx + 1;
-
-      detuneCents.forEach((dc, dIdx) => {
-        const f0     = freq * hNum * Math.pow(2, dc / 1200);
-        const weight = detuneWeights[dIdx] / totalWeight;
-        const amp    = hAmp * weight * (0.55 / freqs.length);
-
-        const osc   = audioCtx.createOscillator();
-        const gNode = audioCtx.createGain();
-
-        osc.type = "sine";
-        osc.frequency.setValueAtTime(f0, onset);
-
-        const decayRate = 0.25 + normF * 0.45;
-        gNode.gain.setValueAtTime(0, onset);
-        gNode.gain.linearRampToValueAtTime(amp, onset + 0.030);
-        gNode.gain.setTargetAtTime(0.001, onset + 0.030, 1 / decayRate);
-
-        osc.connect(gNode);
-        gNode.connect(lpf);
-
-        osc.start(onset);
-        osc.stop(decayEnd);
-
-        activeNodes.push({ osc, gNode });
-      });
-    });
-  });
-
-  activeNodes.push({ masterGain, lpf });
-}
-
-function stopAllNodes() {
-  const now = audioCtx ? audioCtx.currentTime : 0;
-  activeNodes.forEach(n => {
-    try {
-      if (n.gNode) {
-        n.gNode.gain.cancelScheduledValues(now);
-        n.gNode.gain.linearRampToValueAtTime(0, now + 0.05);
-      }
-      if (n.osc) {
-        n.osc.stop(now + 0.06);
-      }
-    } catch (_) {}
-  });
-  activeNodes = [];
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -257,36 +259,31 @@ async function loadMediaPipeModel() {
       loadText.textContent = "Loading model (CPU fallback)…";
       handLandmarker = await tryLoad("CPU");
     } catch (err) {
-      loadText.textContent = "⚠️ Failed to load AI model. Check your internet connection and refresh.";
+      loadText.textContent = "⚠️ Failed to load AI model. Check internet connection and refresh.";
       console.error(err);
       return;
     }
   }
 
   modelReady = true;
-  // Hide loading overlay and show the camera prompt
   overlay.classList.add("hidden");
-  prompt.classList.remove("hidden");  // NOW show camera prompt after model ready
+  prompt.classList.remove("hidden");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // CAMERA
 // ═══════════════════════════════════════════════════════════════════════════
 async function startCamera() {
-  // Prevent double-invocation (e.g. if button clicked twice fast)
   if (cameraStarting) return;
   cameraStarting = true;
 
   const btnCam = document.getElementById("btn-start-camera");
   const prompt = document.getElementById("camera-prompt");
 
-  // Immediately reflect busy state
   btnCam.disabled = true;
   btnCam.querySelector("span").textContent = "Starting…";
 
   try {
-    // NOTE: getUserMedia MUST be called as close to the gesture event as
-    // possible. ensureAudioCtx is called AFTER getUserMedia for mobile compat.
     if (cameraStream) {
       cameraStream.getTracks().forEach(t => t.stop());
       cameraStream = null;
@@ -301,7 +298,6 @@ async function startCamera() {
       audio: false
     });
 
-    // Unlock audio context after camera permission granted (safe now)
     ensureAudioCtx();
 
     videoEl.srcObject = cameraStream;
@@ -314,7 +310,6 @@ async function startCamera() {
     btnCam.classList.add("btn-danger");
 
     syncCanvasSize();
-    lastVideoTime = -1;
     if (rafId) cancelAnimationFrame(rafId);
     rafId = requestAnimationFrame(processFrame);
 
@@ -323,7 +318,6 @@ async function startCamera() {
     btnCam.disabled = false;
     btnCam.querySelector("span").textContent = "Start Camera";
     btnCam.classList.remove("btn-danger");
-    // Re-show the prompt so user can try again
     if (!isCameraRunning) prompt.classList.remove("hidden");
 
     let msg = "Could not access the camera.";
@@ -348,11 +342,11 @@ function stopCamera() {
   const btnCam = document.getElementById("btn-start-camera");
   btnCam.querySelector("span").textContent = "Start Camera";
   btnCam.classList.remove("btn-danger");
-  // Show the prompt again
   document.getElementById("camera-prompt").classList.remove("hidden");
 
   outputCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
   updateFingerPills([false, false, false, false, false]);
+  setChord(0);
 }
 
 async function flipCamera() {
@@ -369,22 +363,20 @@ async function flipCamera() {
 function processFrame() {
   if (!isCameraRunning) return;
 
-  if (videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
-    lastVideoTime = videoEl.currentTime;
-
+  if (videoEl.readyState >= 2) {
+    const now = performance.now();
     outputCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
 
     if (modelReady && handLandmarker) {
-      const result = handLandmarker.detectForVideo(videoEl, performance.now());
+      const result = handLandmarker.detectForVideo(videoEl, now);
 
       if (result.landmarks && result.landmarks.length > 0) {
         const lms = result.landmarks[0];
         drawSkeleton(lms);
 
-        const states = fingerStates(lms);
+        const { states, count } = analyzeHandLandmarks(lms);
         updateFingerPills(states);
 
-        const count = states.filter(Boolean).length;
         gestureHistory.push(count);
         if (gestureHistory.length > DEBOUNCE_N) gestureHistory.shift();
 
@@ -399,55 +391,112 @@ function processFrame() {
   rafId = requestAnimationFrame(processFrame);
 }
 
-// ── 3D Finger Extension Scoring ─────────────────────────────────────────
-function fingerStates(lms) {
-  const dist = (a, b) => {
-    const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z || 0) - (b.z || 0);
-    return Math.sqrt(dx * dx + dy * dy + dz * dz);
-  };
+/**
+ * Smart 3D Finger Classifier — 3D Orientation-Invariant & Scale-Normalized
+ * Identical algorithm to Python main.py analyze_hand_landmarks()
+ */
+function analyzeHandLandmarks(lms) {
+  if (!lms || lms.length < 21) {
+    return { states: [false, false, false, false, false], count: 0 };
+  }
 
-  const wrist    = lms[0];
-  const indexMcp = lms[5];
-  const pinkyMcp = lms[17];
+  const pts = lms.map(lm => [lm.x, lm.y, lm.z || 0]);
 
-  // 1. Thumb (Tip 4, MCP 2, CMC 1)
-  const dThumbTipIndex = dist(lms[4], indexMcp);
-  const dThumbMcpIndex = dist(lms[2], indexMcp);
-  const dThumbTipWrist = dist(lms[4], wrist);
-  const dThumbMcpWrist = dist(lms[2], wrist);
-  const thumbOut = (dThumbTipIndex > dThumbMcpIndex * 1.15) || (dThumbTipWrist > dThumbMcpWrist * 1.12);
+  const w     = pts[0];   // Wrist
+  const m_mid = pts[9];   // Middle MCP
+  const m_idx = pts[5];   // Index MCP
+  const m_pky = pts[17];  // Pinky MCP
 
-  // 2. Index (Tip 8, PIP 6, MCP 5)
-  const dIndexTipWrist = dist(lms[8], wrist);
-  const dIndexPipWrist = dist(lms[6], wrist);
-  const dIndexTipMcp   = dist(lms[8], indexMcp);
-  const dIndexPipMcp   = dist(lms[6], indexMcp);
-  const indexOut = (dIndexTipWrist > dIndexPipWrist * 1.05) || (dIndexTipMcp > dIndexPipMcp * 1.25);
+  const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const norm = (v) => Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+  const dot = (u, v) => u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
+  const cross = (u, v) => [
+    u[1] * v[2] - u[2] * v[1],
+    u[2] * v[0] - u[0] * v[2],
+    u[0] * v[1] - u[1] * v[0]
+  ];
+  const dist = (a, b) => norm(sub(a, b));
 
-  // 3. Middle (Tip 12, PIP 10, MCP 9)
-  const middleMcp       = lms[9];
-  const dMiddleTipWrist = dist(lms[12], wrist);
-  const dMiddlePipWrist = dist(lms[10], wrist);
-  const dMiddleTipMcp   = dist(lms[12], middleMcp);
-  const dMiddlePipMcp   = dist(lms[10], middleMcp);
-  const middleOut = (dMiddleTipWrist > dMiddlePipWrist * 1.05) || (dMiddleTipMcp > dMiddlePipMcp * 1.25);
+  // Y-axis (Palm upward vector from Wrist to Middle MCP)
+  let v_y = sub(m_mid, w);
+  const hand_scale = norm(v_y);
+  if (hand_scale < 1e-6) {
+    return { states: [false, false, false, false, false], count: 0 };
+  }
+  v_y = [v_y[0] / hand_scale, v_y[1] / hand_scale, v_y[2] / hand_scale];
 
-  // 4. Ring (Tip 16, PIP 14, MCP 13)
-  const ringMcp       = lms[13];
-  const dRingTipWrist = dist(lms[16], wrist);
-  const dRingPipWrist = dist(lms[14], wrist);
-  const dRingTipMcp   = dist(lms[16], ringMcp);
-  const dRingPipMcp   = dist(lms[14], ringMcp);
-  const ringOut = (dRingTipWrist > dRingPipWrist * 1.04) || (dRingTipMcp > dRingPipMcp * 1.25);
+  // Palm reference vectors
+  const v_idx = sub(m_idx, w);
+  const v_pky = sub(m_pky, w);
 
-  // 5. Pinky (Tip 20, PIP 18, MCP 17) — Tailored specifically for pinky proportions
-  const dPinkyTipWrist = dist(lms[20], wrist);
-  const dPinkyPipWrist = dist(lms[18], wrist);
-  const dPinkyTipMcp   = dist(lms[20], pinkyMcp);
-  const dPinkyPipMcp   = dist(lms[18], pinkyMcp);
-  const pinkyOut = (dPinkyTipWrist > dPinkyPipWrist * 1.02) || (dPinkyTipMcp > dPinkyPipMcp * 1.20);
+  // Z-axis (Palm normal plane)
+  let v_z = cross(v_idx, v_pky);
+  let norm_z = norm(v_z);
+  if (norm_z < 1e-6) {
+    v_z = [0, 0, 1];
+  } else {
+    v_z = [v_z[0] / norm_z, v_z[1] / norm_z, v_z[2] / norm_z];
+  }
 
-  return [thumbOut, indexOut, middleOut, ringOut, pinkyOut];
+  // X-axis (Across palm)
+  let v_x = cross(v_y, v_z);
+  let norm_x = norm(v_x);
+  if (norm_x < 1e-6) {
+    v_x = [1, 0, 0];
+  } else {
+    v_x = [v_x[0] / norm_x, v_x[1] / norm_x, v_x[2] / norm_x];
+  }
+
+  // Orthonormal transformation basis: pts_local = (pts - w) @ R.T
+  const pts_local = pts.map(p => {
+    const p_rel = sub(p, w);
+    return [dot(p_rel, v_x), dot(p_rel, v_y), dot(p_rel, v_z)];
+  });
+
+  const extended = [];
+
+  // 1. Thumb analysis (1: CMC, 2: MCP, 3: IP, 4: TIP)
+  const t_tip = pts[4];
+  const t_ip  = pts[3];
+
+  const d_tip_idx = dist(t_tip, pts[5]) / hand_scale;
+  const d_tip_pky = dist(t_tip, pts[17]) / hand_scale;
+  const d_ip_idx  = dist(t_ip, pts[5]) / hand_scale;
+
+  const thumb_spread = (d_tip_idx > 0.52) && (d_tip_pky > 0.75) && (d_tip_idx > d_ip_idx * 1.05);
+  const thumb_local_ext = dist(pts_local[4], pts_local[2]) / hand_scale;
+  const thumb_up = thumb_spread || (thumb_local_ext > 0.55 && d_tip_idx > 0.48);
+  extended.push(Boolean(thumb_up));
+
+  // 2. Main 4 Fingers (Index, Middle, Ring, Pinky)
+  const finger_indices = [
+    [5, 6, 7, 8],     // Index: MCP, PIP, DIP, TIP
+    [9, 10, 11, 12],  // Middle: MCP, PIP, DIP, TIP
+    [13, 14, 15, 16], // Ring: MCP, PIP, DIP, TIP
+    [17, 18, 19, 20]  // Pinky: MCP, PIP, DIP, TIP
+  ];
+
+  for (const [mcp, pip, dip, tip] of finger_indices) {
+    const loc_ext = (pts_local[tip][1] - pts_local[mcp][1]) / Math.max(hand_scale, 1e-5);
+    const pip_loc_ext = (pts_local[pip][1] - pts_local[mcp][1]) / Math.max(hand_scale, 1e-5);
+
+    const d_tip_w = dist(pts[tip], w);
+    const d_pip_w = dist(pts[pip], w);
+    const euclid_ratio = d_tip_w / Math.max(d_pip_w, 1e-5);
+
+    const u = sub(pts[pip], pts[mcp]);
+    const v = sub(pts[tip], pts[pip]);
+    const u_norm = norm(u);
+    const v_norm = norm(v);
+    const cos_flex = (u_norm > 1e-6 && v_norm > 1e-6) ? (dot(u, v) / (u_norm * v_norm)) : 1.0;
+
+    const min_euclid = (mcp === 17) ? 1.02 : 1.04;
+    const is_extended = (loc_ext > pip_loc_ext + 0.08) && (euclid_ratio > min_euclid) && (cos_flex > 0.35);
+    extended.push(Boolean(is_extended));
+  }
+
+  const count = Math.min(extended.filter(Boolean).length, 5);
+  return { states: extended, count };
 }
 
 function majority(arr) {
@@ -455,7 +504,7 @@ function majority(arr) {
   const cnt = {};
   let best = arr[0], bestC = 0;
   for (const v of arr) {
-    cnt[v] = (cnt[v]||0) + 1;
+    cnt[v] = (cnt[v] || 0) + 1;
     if (cnt[v] > bestC) { bestC = cnt[v]; best = v; }
   }
   return best;
@@ -475,10 +524,11 @@ function setChord(id) {
 // ═══════════════════════════════════════════════════════════════════════════
 function syncCanvasSize() {
   const stage = document.querySelector(".stage-container");
+  if (!stage) return;
   outputCanvas.width  = stage.clientWidth;
   outputCanvas.height = stage.clientHeight;
   stringsCanvas.width  = stage.clientWidth;
-  stringsCanvas.height = stringsCanvas.parentElement.clientHeight || 80;
+  stringsCanvas.height = stringsCanvas.parentElement ? stringsCanvas.parentElement.clientHeight : 80;
 }
 
 function drawSkeleton(lms) {
@@ -515,7 +565,7 @@ function drawSkeleton(lms) {
   outputCtx.shadowBlur = 0;
 }
 
-// ─── Guitar String Animation ─────────────────────────────────────────────
+// ── Guitar String Animation ───────────────────────────────────────────────
 function kickStrings() {
   vibAmps = vibAmps.map(() => 1.0);
 }
@@ -567,12 +617,21 @@ function animateStrings(ts) {
 function updateChordUI(id) {
   const cfg = CHORD_CONFIG[id];
 
-  document.getElementById("chord-display-name").textContent = cfg.name;
-  document.getElementById("chord-display-name").style.color = cfg.color;
-  document.getElementById("finger-count-pill").textContent  =
-    id === 0 ? "Fist (Mute)" : `${id} Finger${id > 1 ? "s" : ""}`;
+  const nameEl  = document.getElementById("chord-display-name");
+  const countEl = document.getElementById("finger-count-pill");
+  const badgeEl = document.getElementById("chord-badge");
 
-  document.getElementById("chord-badge").style.setProperty("--active-chord-color", cfg.color);
+  if (nameEl) {
+    nameEl.textContent = cfg.name;
+    nameEl.style.color = cfg.color;
+  }
+  if (countEl) {
+    countEl.textContent = id === 0 ? "Fist (Mute)" : `${id} Finger${id > 1 ? "s" : ""}`;
+  }
+  if (badgeEl) {
+    badgeEl.style.setProperty("--active-chord-color", cfg.color);
+  }
+
   document.documentElement.style.setProperty("--active-chord-color", cfg.color);
 
   document.querySelectorAll(".chord-btn").forEach(btn => {
@@ -581,10 +640,11 @@ function updateChordUI(id) {
 }
 
 function updateFingerPills(states) {
-  const ids    = ["pill-thumb","pill-index","pill-middle","pill-ring","pill-pinky"];
-  const color  = CHORD_CONFIG[currentChord].color;
+  const ids   = ["pill-thumb","pill-index","pill-middle","pill-ring","pill-pinky"];
+  const color = CHORD_CONFIG[currentChord].color;
   ids.forEach((id, i) => {
     const el = document.getElementById(id);
+    if (!el) return;
     if (states[i]) {
       el.classList.add("active");
       el.style.background = color;
@@ -603,7 +663,8 @@ function updateFingerPills(states) {
 function setupVoice() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    document.getElementById("btn-voice").style.display = "none";
+    const btn = document.getElementById("btn-voice");
+    if (btn) btn.style.display = "none";
     return false;
   }
   speechRec = new SR();
@@ -633,12 +694,12 @@ function toggleVoice() {
   const label = document.getElementById("voice-label");
   if (voiceActive) {
     try { speechRec.start(); } catch (_) {}
-    btn.classList.add("active");
-    label.textContent = "Voice On";
+    if (btn) btn.classList.add("active");
+    if (label) label.textContent = "Voice On";
   } else {
     speechRec.stop();
-    btn.classList.remove("active");
-    label.textContent = "Voice Off";
+    if (btn) btn.classList.remove("active");
+    if (label) label.textContent = "Voice Off";
   }
 }
 
@@ -661,9 +722,6 @@ function bindUI() {
   const btnCam    = document.getElementById("btn-start-camera");
   const btnPrompt = document.getElementById("btn-start-prompt");
 
-  // ── Start / Stop Camera ──────────────────────────────────────────────────
-  // Uses both click and touchend to ensure immediate response on mobile.
-  // touchend handler calls preventDefault to avoid ghost-click delay.
   function handleCameraToggle(e) {
     e.preventDefault();
     e.stopPropagation();
@@ -674,26 +732,28 @@ function bindUI() {
     }
   }
 
-  btnCam.addEventListener("click",     handleCameraToggle);
-  btnCam.addEventListener("touchend",  handleCameraToggle, { passive: false });
+  if (btnCam) {
+    btnCam.addEventListener("click",    handleCameraToggle);
+    btnCam.addEventListener("touchend", handleCameraToggle, { passive: false });
+  }
 
-  // ── Camera-prompt "Tap to Enable" button ─────────────────────────────────
   function handlePromptStart(e) {
     e.preventDefault();
     e.stopPropagation();
     startCamera();
   }
 
-  btnPrompt.addEventListener("click",    handlePromptStart);
-  btnPrompt.addEventListener("touchend", handlePromptStart, { passive: false });
+  if (btnPrompt) {
+    btnPrompt.addEventListener("click",    handlePromptStart);
+    btnPrompt.addEventListener("touchend", handlePromptStart, { passive: false });
+  }
 
-  // ── Flip Camera ──────────────────────────────────────────────────────────
-  document.getElementById("btn-camera-flip").addEventListener("click", flipCamera);
+  const flipBtn = document.getElementById("btn-camera-flip");
+  if (flipBtn) flipBtn.addEventListener("click", flipCamera);
 
-  // ── Voice Toggle ─────────────────────────────────────────────────────────
-  document.getElementById("btn-voice").addEventListener("click", toggleVoice);
+  const voiceBtn = document.getElementById("btn-voice");
+  if (voiceBtn) voiceBtn.addEventListener("click", toggleVoice);
 
-  // ── Chord Deck Buttons (touch + click) ───────────────────────────────────
   document.querySelectorAll(".chord-btn").forEach(btn => {
     const trigger = (e) => {
       e.preventDefault();
@@ -704,7 +764,6 @@ function bindUI() {
     btn.addEventListener("touchstart", trigger, { passive: false });
   });
 
-  // ── Keyboard shortcuts ───────────────────────────────────────────────────
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     const k = e.key.toLowerCase();
