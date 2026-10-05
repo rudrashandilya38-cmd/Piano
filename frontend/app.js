@@ -393,7 +393,7 @@ function processFrame() {
 
 /**
  * Smart 3D Finger Classifier — 3D Orientation-Invariant & Scale-Normalized
- * Identical algorithm to Python main.py analyze_hand_landmarks()
+ * Optimized for high responsiveness across all 5 fingers (Thumb, Index, Middle, Ring, Pinky).
  */
 function analyzeHandLandmarks(lms) {
   if (!lms || lms.length < 21) {
@@ -463,9 +463,10 @@ function analyzeHandLandmarks(lms) {
   const d_tip_pky = dist(t_tip, pts[17]) / hand_scale;
   const d_ip_idx  = dist(t_ip, pts[5]) / hand_scale;
 
-  const thumb_spread = (d_tip_idx > 0.52) && (d_tip_pky > 0.75) && (d_tip_idx > d_ip_idx * 1.05);
+  const thumb_spread = (d_tip_idx > 0.42) && (d_tip_pky > 0.55) && (d_tip_idx > d_ip_idx * 1.02);
   const thumb_local_ext = dist(pts_local[4], pts_local[2]) / hand_scale;
-  const thumb_up = thumb_spread || (thumb_local_ext > 0.55 && d_tip_idx > 0.48);
+  const thumb_side_out = Math.abs(pts_local[4][0] - pts_local[2][0]) / hand_scale;
+  const thumb_up = thumb_spread || (thumb_local_ext > 0.42 && d_tip_idx > 0.40) || (thumb_side_out > 0.30);
   extended.push(Boolean(thumb_up));
 
   // 2. Main 4 Fingers (Index, Middle, Ring, Pinky)
@@ -490,8 +491,11 @@ function analyzeHandLandmarks(lms) {
     const v_norm = norm(v);
     const cos_flex = (u_norm > 1e-6 && v_norm > 1e-6) ? (dot(u, v) / (u_norm * v_norm)) : 1.0;
 
-    const min_euclid = (mcp === 17) ? 1.02 : 1.04;
-    const is_extended = (loc_ext > pip_loc_ext + 0.08) && (euclid_ratio > min_euclid) && (cos_flex > 0.35);
+    const isPinky = (mcp === 17);
+    const min_euclid = isPinky ? 1.00 : 1.02;
+    const ext_margin = isPinky ? 0.04 : 0.05;
+
+    const is_extended = (loc_ext > pip_loc_ext + ext_margin) && (euclid_ratio > min_euclid) && (cos_flex > 0.20);
     extended.push(Boolean(is_extended));
   }
 
