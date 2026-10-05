@@ -381,7 +381,8 @@ def analyze_hand_landmarks(landmarks):
         else:
             cos_flex = 1.0
 
-        is_extended = (loc_ext > pip_loc_ext + 0.12) and (euclid_ratio > 1.05) and (cos_flex > 0.40)
+        min_euclid = 1.02 if mcp == 17 else 1.04
+        is_extended = (loc_ext > pip_loc_ext + 0.08) and (euclid_ratio > min_euclid) and (cos_flex > 0.35)
         extended.append(bool(is_extended))
 
     return extended, min(sum(extended), 5)

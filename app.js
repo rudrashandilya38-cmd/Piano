@@ -402,18 +402,50 @@ function processFrame() {
 // ── 3D Finger Extension Scoring ─────────────────────────────────────────
 function fingerStates(lms) {
   const dist = (a, b) => {
-    const dx = a.x-b.x, dy = a.y-b.y, dz = (a.z||0)-(b.z||0);
-    return Math.sqrt(dx*dx + dy*dy + dz*dz);
+    const dx = a.x - b.x, dy = a.y - b.y, dz = (a.z || 0) - (b.z || 0);
+    return Math.sqrt(dx * dx + dy * dy + dz * dz);
   };
 
   const wrist    = lms[0];
   const indexMcp = lms[5];
+  const pinkyMcp = lms[17];
 
-  const thumbOut  = dist(lms[4], indexMcp) > dist(lms[2], indexMcp) * 1.35;
-  const indexOut  = dist(lms[8],  wrist) > dist(lms[6],  wrist) * 1.08;
-  const middleOut = dist(lms[12], wrist) > dist(lms[10], wrist) * 1.08;
-  const ringOut   = dist(lms[16], wrist) > dist(lms[14], wrist) * 1.08;
-  const pinkyOut  = dist(lms[20], wrist) > dist(lms[18], wrist) * 1.08;
+  // 1. Thumb (Tip 4, MCP 2, CMC 1)
+  const dThumbTipIndex = dist(lms[4], indexMcp);
+  const dThumbMcpIndex = dist(lms[2], indexMcp);
+  const dThumbTipWrist = dist(lms[4], wrist);
+  const dThumbMcpWrist = dist(lms[2], wrist);
+  const thumbOut = (dThumbTipIndex > dThumbMcpIndex * 1.15) || (dThumbTipWrist > dThumbMcpWrist * 1.12);
+
+  // 2. Index (Tip 8, PIP 6, MCP 5)
+  const dIndexTipWrist = dist(lms[8], wrist);
+  const dIndexPipWrist = dist(lms[6], wrist);
+  const dIndexTipMcp   = dist(lms[8], indexMcp);
+  const dIndexPipMcp   = dist(lms[6], indexMcp);
+  const indexOut = (dIndexTipWrist > dIndexPipWrist * 1.05) || (dIndexTipMcp > dIndexPipMcp * 1.25);
+
+  // 3. Middle (Tip 12, PIP 10, MCP 9)
+  const middleMcp       = lms[9];
+  const dMiddleTipWrist = dist(lms[12], wrist);
+  const dMiddlePipWrist = dist(lms[10], wrist);
+  const dMiddleTipMcp   = dist(lms[12], middleMcp);
+  const dMiddlePipMcp   = dist(lms[10], middleMcp);
+  const middleOut = (dMiddleTipWrist > dMiddlePipWrist * 1.05) || (dMiddleTipMcp > dMiddlePipMcp * 1.25);
+
+  // 4. Ring (Tip 16, PIP 14, MCP 13)
+  const ringMcp       = lms[13];
+  const dRingTipWrist = dist(lms[16], wrist);
+  const dRingPipWrist = dist(lms[14], wrist);
+  const dRingTipMcp   = dist(lms[16], ringMcp);
+  const dRingPipMcp   = dist(lms[14], ringMcp);
+  const ringOut = (dRingTipWrist > dRingPipWrist * 1.04) || (dRingTipMcp > dRingPipMcp * 1.25);
+
+  // 5. Pinky (Tip 20, PIP 18, MCP 17) — Tailored specifically for pinky proportions
+  const dPinkyTipWrist = dist(lms[20], wrist);
+  const dPinkyPipWrist = dist(lms[18], wrist);
+  const dPinkyTipMcp   = dist(lms[20], pinkyMcp);
+  const dPinkyPipMcp   = dist(lms[18], pinkyMcp);
+  const pinkyOut = (dPinkyTipWrist > dPinkyPipWrist * 1.02) || (dPinkyTipMcp > dPinkyPipMcp * 1.20);
 
   return [thumbOut, indexOut, middleOut, ringOut, pinkyOut];
 }
