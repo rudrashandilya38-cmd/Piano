@@ -17,7 +17,7 @@
     <div class="logo">
       <span class="logo-icon">🎸</span>
       <h1>Gesture Guitar</h1>
-      <span class="version-badge">Mobile & Web</span>
+      <span class="version-badge">Mobile &amp; Web</span>
     </div>
     <div class="header-controls">
       <button id="btn-camera-flip" class="icon-button" title="Flip Camera" aria-label="Flip Camera">
@@ -27,7 +27,8 @@
         <span class="voice-dot"></span>
         <span id="voice-label">Voice Off</span>
       </button>
-      <button id="btn-start-camera" class="btn-primary">
+      <!-- START CAMERA — always on top, pointer-events always active -->
+      <button id="btn-start-camera" class="btn-primary" type="button">
         <span>Start Camera</span>
       </button>
     </div>
@@ -65,7 +66,7 @@
       <!-- Loading Splash Overlay inside Stage -->
       <div id="loading-overlay" class="stage-overlay">
         <div class="spinner"></div>
-        <p id="loading-text">Synthesizing Nylon-String Guitar Chords & Loading AI Task Model...</p>
+        <p id="loading-text">Synthesizing Acoustic Guitar Physical Modeling &amp; Loading AI Model...</p>
       </div>
 
       <!-- Camera Start Prompt inside Stage when inactive -->
@@ -74,9 +75,100 @@
         <div class="prompt-icon">📷</div>
         <h2>Allow Camera Access</h2>
         <p>Hold up 1 to 5 fingers in front of your front camera to play guitar chords in real-time!</p>
-        <button id="btn-start-prompt" class="btn-primary btn-large">Tap to Enable Camera</button>
+        <button id="btn-start-prompt" class="btn-primary btn-large" type="button">Tap to Enable Camera</button>
       </div>
     </div>
+
+    <!-- ── Sound Settings & Effects Studio (Stage 2) ── -->
+    <section class="sound-studio-panel" id="sound-studio-panel" aria-label="Sound Settings &amp; Effects">
+      <div class="studio-header" id="studio-header-toggle">
+        <div class="studio-title-group">
+          <span class="studio-icon">🎛️</span>
+          <div>
+            <h3>Sound Studio &amp; Effects</h3>
+            <span class="studio-subtitle" id="active-preset-desc">Warm Nylon • Intimate Classical Tone</span>
+          </div>
+        </div>
+        <div class="studio-header-actions">
+          <button id="btn-ambient-quick" class="ambient-pill-btn" type="button" title="Toggle Ambient Sustain">
+            <span class="ambient-sparkle">✨</span>
+            <span class="ambient-text">Ambient</span>
+          </button>
+          <button id="btn-collapse-studio" class="collapse-btn" type="button" aria-expanded="true" aria-label="Toggle Sound Settings Panel">
+            <span class="collapse-icon">▾</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="studio-body" id="studio-body">
+        <!-- Preset Selector Pills -->
+        <div class="presets-container">
+          <span class="control-label">Guitar Presets</span>
+          <div class="presets-grid" role="radiogroup" aria-label="Guitar Presets">
+            <button class="preset-pill active" data-preset="nylon" type="button" role="radio" aria-checked="true">
+              <span class="preset-icon">🪵</span>
+              <span class="preset-info">
+                <span class="preset-name">Warm Nylon</span>
+                <span class="preset-tag">Mellow Classical</span>
+              </span>
+            </button>
+            <button class="preset-pill" data-preset="bright" type="button" role="radio" aria-checked="false">
+              <span class="preset-icon">✨</span>
+              <span class="preset-info">
+                <span class="preset-name">Bright Acoustic</span>
+                <span class="preset-tag">Steel-String Chime</span>
+              </span>
+            </button>
+            <button class="preset-pill" data-preset="ambient" type="button" role="radio" aria-checked="false">
+              <span class="preset-icon">🌌</span>
+              <span class="preset-info">
+                <span class="preset-name">Dreamy Ambient</span>
+                <span class="preset-tag">Ethereal Sustain</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Real-Time Sliders Grid -->
+        <div class="sliders-grid">
+          <!-- Master Volume -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-volume">Master Volume</label>
+              <span class="slider-val" id="val-volume">85%</span>
+            </div>
+            <input type="range" id="slider-volume" min="0" max="100" value="85" step="1" aria-label="Master Volume">
+          </div>
+
+          <!-- Sustain Decay -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-sustain">Sustain Decay</label>
+              <span class="slider-val" id="val-sustain">1.0x</span>
+            </div>
+            <input type="range" id="slider-sustain" min="50" max="220" value="100" step="5" aria-label="Sustain Decay">
+          </div>
+
+          <!-- Room Reverb -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-reverb">Room Reverb</label>
+              <span class="slider-val" id="val-reverb">14%</span>
+            </div>
+            <input type="range" id="slider-reverb" min="0" max="50" value="14" step="1" aria-label="Reverb Intensity">
+          </div>
+
+          <!-- Tone Brightness -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-tone">Tone Brightness</label>
+              <span class="slider-val" id="val-tone">0 dB</span>
+            </div>
+            <input type="range" id="slider-tone" min="-60" max="60" value="0" step="2" aria-label="Tone Brightness">
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- Interactive Touch Chord Deck / Mobile Control Panel -->
     <section class="controls-panel">
@@ -86,53 +178,53 @@
       </div>
 
       <div class="chord-buttons-grid">
-        <button class="chord-btn" data-chord="1" data-name="Em" style="--chord-color: #ff5a5a;">
+        <button class="chord-btn" data-chord="1" data-name="Em" style="--chord-color: #ff5a5a;" type="button">
           <span class="btn-fingers">1 Finger</span>
           <span class="btn-chord-name">Em</span>
           <span class="btn-full-name">E Minor</span>
         </button>
 
-        <button class="chord-btn" data-chord="2" data-name="Am" style="--chord-color: #ffa53c;">
+        <button class="chord-btn" data-chord="2" data-name="Am" style="--chord-color: #ffa53c;" type="button">
           <span class="btn-fingers">2 Fingers</span>
           <span class="btn-chord-name">Am</span>
           <span class="btn-full-name">A Minor</span>
         </button>
 
-        <button class="chord-btn" data-chord="3" data-name="C" style="--chord-color: #50dc78;">
+        <button class="chord-btn" data-chord="3" data-name="C" style="--chord-color: #50dc78;" type="button">
           <span class="btn-fingers">3 Fingers</span>
           <span class="btn-chord-name">C</span>
           <span class="btn-full-name">C Major</span>
         </button>
 
-        <button class="chord-btn" data-chord="4" data-name="D" style="--chord-color: #50a0ff;">
+        <button class="chord-btn" data-chord="4" data-name="D" style="--chord-color: #50a0ff;" type="button">
           <span class="btn-fingers">4 Fingers</span>
           <span class="btn-chord-name">D</span>
           <span class="btn-full-name">D Major</span>
         </button>
 
-        <button class="chord-btn" data-chord="5" data-name="G" style="--chord-color: #c850ff;">
+        <button class="chord-btn" data-chord="5" data-name="G" style="--chord-color: #c850ff;" type="button">
           <span class="btn-fingers">5 Fingers</span>
           <span class="btn-chord-name">G</span>
           <span class="btn-full-name">G Major</span>
         </button>
 
-        <button class="chord-btn mute-btn" data-chord="0" data-name="Mute" style="--chord-color: #8a99ad;">
+        <button class="chord-btn mute-btn" data-chord="0" data-name="Mute" style="--chord-color: #8a99ad;" type="button">
           <span class="btn-fingers">Fist (0)</span>
-          <span class="btn-chord-name">✊ Mute</span>
+          <span class="btn-chord-name">&#x270A; Mute</span>
           <span class="btn-full-name">Silence</span>
         </button>
       </div>
 
       <!-- Quick Guide Accordion / Help -->
       <div class="guide-card">
-        <h3>🖐 Hand Gesture Mapping</h3>
+        <h3>&#x1F590; Hand Gesture Mapping</h3>
         <div class="guide-table">
-          <div class="guide-row"><span class="g-fingers">✊ Fist (0)</span><span class="g-chord">Mute</span><span class="g-voice">"stop" / "mute"</span></div>
-          <div class="guide-row"><span class="g-fingers">☝ 1 Finger</span><span class="g-chord">Em (E Minor)</span><span class="g-voice">"e minor" / "1"</span></div>
-          <div class="guide-row"><span class="g-fingers">✌ 2 Fingers</span><span class="g-chord">Am (A Minor)</span><span class="g-voice">"a minor" / "2"</span></div>
-          <div class="guide-row"><span class="g-fingers">🤟 3 Fingers</span><span class="g-chord">C Major</span><span class="g-voice">"c major" / "3"</span></div>
-          <div class="guide-row"><span class="g-fingers">🖖 4 Fingers</span><span class="g-chord">D Major</span><span class="g-voice">"d major" / "4"</span></div>
-          <div class="guide-row"><span class="g-fingers">🖐 5 Fingers</span><span class="g-chord">G Major</span><span class="g-voice">"g major" / "5"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x270A; Fist (0)</span><span class="g-chord">Mute</span><span class="g-voice">"stop" / "mute"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x261D; 1 Finger</span><span class="g-chord">Em (E Minor)</span><span class="g-voice">"e minor" / "1"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x270C; 2 Fingers</span><span class="g-chord">Am (A Minor)</span><span class="g-voice">"a minor" / "2"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F91F; 3 Fingers</span><span class="g-chord">C Major</span><span class="g-voice">"c major" / "3"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F596; 4 Fingers</span><span class="g-chord">D Major</span><span class="g-voice">"d major" / "4"</span></div>
+          <div class="guide-row"><span class="g-fingers">&#x1F590; 5 Fingers</span><span class="g-chord">G Major</span><span class="g-voice">"g major" / "5"</span></div>
         </div>
       </div>
     </section>
@@ -140,7 +232,7 @@
   </main>
 
   <footer class="app-footer">
-    <p>Gesture Guitar — Powered by MediaPipe Tasks Vision & Web Audio API</p>
+    <p>Gesture Guitar — Powered by MediaPipe Tasks Vision &amp; Web Audio API</p>
   </footer>
 
   <!-- Include Application JavaScript (Module) -->

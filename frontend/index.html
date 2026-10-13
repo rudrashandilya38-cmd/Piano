@@ -43,12 +43,20 @@
 
       <!-- Glass Overlay HUD Top Bar -->
       <div class="hud-top-bar">
-        <div class="finger-indicators">
-          <div class="finger-pill" id="pill-thumb" data-finger="T">T</div>
-          <div class="finger-pill" id="pill-index" data-finger="I">I</div>
-          <div class="finger-pill" id="pill-middle" data-finger="M">M</div>
-          <div class="finger-pill" id="pill-ring" data-finger="R">R</div>
-          <div class="finger-pill" id="pill-pinky" data-finger="P">P</div>
+        <div class="hud-left-group">
+          <div class="finger-indicators">
+            <div class="finger-pill" id="pill-thumb" data-finger="T">T</div>
+            <div class="finger-pill" id="pill-index" data-finger="I">I</div>
+            <div class="finger-pill" id="pill-middle" data-finger="M">M</div>
+            <div class="finger-pill" id="pill-ring" data-finger="R">R</div>
+            <div class="finger-pill" id="pill-pinky" data-finger="P">P</div>
+          </div>
+          <!-- Stage 3: Hand Mode & Expression Indicators -->
+          <div class="expression-hud">
+            <span class="hand-mode-badge" id="hand-mode-badge">☝ Single Hand</span>
+            <span class="strum-status" id="strum-status">🎸 Ready</span>
+            <span class="expression-label" id="expression-label"></span>
+          </div>
         </div>
 
         <div class="active-chord-badge" id="chord-badge">
@@ -66,7 +74,7 @@
       <!-- Loading Splash Overlay inside Stage -->
       <div id="loading-overlay" class="stage-overlay">
         <div class="spinner"></div>
-        <p id="loading-text">Synthesizing Nylon-String Guitar Chords &amp; Loading AI Task Model...</p>
+        <p id="loading-text">Synthesizing Acoustic Guitar Physical Modeling &amp; Loading AI Model...</p>
       </div>
 
       <!-- Camera Start Prompt inside Stage when inactive -->
@@ -74,10 +82,101 @@
       <div id="camera-prompt" class="stage-overlay hidden">
         <div class="prompt-icon">📷</div>
         <h2>Allow Camera Access</h2>
-        <p>Hold up 1 to 5 fingers in front of your front camera to play guitar chords in real-time!</p>
+        <p>Use one hand for chords (1-5 fingers) or both hands for expressive two-hand playing — chord hand + strum hand!</p>
         <button id="btn-start-prompt" class="btn-primary btn-large" type="button">Tap to Enable Camera</button>
       </div>
     </div>
+
+    <!-- ── Sound Settings & Effects Studio (Stage 2) ── -->
+    <section class="sound-studio-panel" id="sound-studio-panel" aria-label="Sound Settings &amp; Effects">
+      <div class="studio-header" id="studio-header-toggle">
+        <div class="studio-title-group">
+          <span class="studio-icon">🎛️</span>
+          <div>
+            <h3>Sound Studio &amp; Effects</h3>
+            <span class="studio-subtitle" id="active-preset-desc">Warm Nylon • Intimate Classical Tone</span>
+          </div>
+        </div>
+        <div class="studio-header-actions">
+          <button id="btn-ambient-quick" class="ambient-pill-btn" type="button" title="Toggle Ambient Sustain">
+            <span class="ambient-sparkle">✨</span>
+            <span class="ambient-text">Ambient</span>
+          </button>
+          <button id="btn-collapse-studio" class="collapse-btn" type="button" aria-expanded="true" aria-label="Toggle Sound Settings Panel">
+            <span class="collapse-icon">▾</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="studio-body" id="studio-body">
+        <!-- Preset Selector Pills -->
+        <div class="presets-container">
+          <span class="control-label">Guitar Presets</span>
+          <div class="presets-grid" role="radiogroup" aria-label="Guitar Presets">
+            <button class="preset-pill active" data-preset="nylon" type="button" role="radio" aria-checked="true">
+              <span class="preset-icon">🪵</span>
+              <span class="preset-info">
+                <span class="preset-name">Warm Nylon</span>
+                <span class="preset-tag">Mellow Classical</span>
+              </span>
+            </button>
+            <button class="preset-pill" data-preset="bright" type="button" role="radio" aria-checked="false">
+              <span class="preset-icon">✨</span>
+              <span class="preset-info">
+                <span class="preset-name">Bright Acoustic</span>
+                <span class="preset-tag">Steel-String Chime</span>
+              </span>
+            </button>
+            <button class="preset-pill" data-preset="ambient" type="button" role="radio" aria-checked="false">
+              <span class="preset-icon">🌌</span>
+              <span class="preset-info">
+                <span class="preset-name">Dreamy Ambient</span>
+                <span class="preset-tag">Ethereal Sustain</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Real-Time Sliders Grid -->
+        <div class="sliders-grid">
+          <!-- Master Volume -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-volume">Master Volume</label>
+              <span class="slider-val" id="val-volume">85%</span>
+            </div>
+            <input type="range" id="slider-volume" min="0" max="100" value="85" step="1" aria-label="Master Volume">
+          </div>
+
+          <!-- Sustain Decay -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-sustain">Sustain Decay</label>
+              <span class="slider-val" id="val-sustain">1.0x</span>
+            </div>
+            <input type="range" id="slider-sustain" min="50" max="220" value="100" step="5" aria-label="Sustain Decay">
+          </div>
+
+          <!-- Room Reverb -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-reverb">Room Reverb</label>
+              <span class="slider-val" id="val-reverb">14%</span>
+            </div>
+            <input type="range" id="slider-reverb" min="0" max="50" value="14" step="1" aria-label="Reverb Intensity">
+          </div>
+
+          <!-- Tone Brightness -->
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-tone">Tone Brightness</label>
+              <span class="slider-val" id="val-tone">0 dB</span>
+            </div>
+            <input type="range" id="slider-tone" min="-60" max="60" value="0" step="2" aria-label="Tone Brightness">
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- Interactive Touch Chord Deck / Mobile Control Panel -->
     <section class="controls-panel">
@@ -126,14 +225,29 @@
 
       <!-- Quick Guide Accordion / Help -->
       <div class="guide-card">
-        <h3>&#x1F590; Hand Gesture Mapping</h3>
+        <h3>&#x1F590; Playing Modes</h3>
         <div class="guide-table">
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">☝ Single Hand Mode</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">auto-strum</span>
+          </div>
           <div class="guide-row"><span class="g-fingers">&#x270A; Fist (0)</span><span class="g-chord">Mute</span><span class="g-voice">"stop" / "mute"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x261D; 1 Finger</span><span class="g-chord">Em (E Minor)</span><span class="g-voice">"e minor" / "1"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x270C; 2 Fingers</span><span class="g-chord">Am (A Minor)</span><span class="g-voice">"a minor" / "2"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F91F; 3 Fingers</span><span class="g-chord">C Major</span><span class="g-voice">"c major" / "3"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F596; 4 Fingers</span><span class="g-chord">D Major</span><span class="g-voice">"d major" / "4"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F590; 5 Fingers</span><span class="g-chord">G Major</span><span class="g-voice">"g major" / "5"</span></div>
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">✌ Two-Hand Mode</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">expressive</span>
+          </div>
+          <div class="guide-row"><span class="g-fingers">Left hand</span><span class="g-chord">Chord fingers</span><span class="g-voice">select chord</span></div>
+          <div class="guide-row"><span class="g-fingers">Right hand ↕</span><span class="g-chord">Strum motion</span><span class="g-voice">velocity strum</span></div>
+          <div class="guide-row"><span class="g-fingers">Right palm 🤚</span><span class="g-chord">Palm Mute</span><span class="g-voice">instant damp</span></div>
+          <div class="guide-row"><span class="g-fingers">Add fingers</span><span class="g-chord">Hammer-On 🔨</span><span class="g-voice">legato add</span></div>
+          <div class="guide-row"><span class="g-fingers">Remove fingers</span><span class="g-chord">Pull-Off 🎵</span><span class="g-voice">legato release</span></div>
         </div>
       </div>
     </section>

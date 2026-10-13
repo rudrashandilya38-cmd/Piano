@@ -8,6 +8,9 @@
  * Gesture Engine: MediaPipe HandLandmarker (VIDEO mode) + Smart 3D Orientation-Invariant
  *   and Scale-Normalized Finger Scoring algorithm identical to Python main.py.
  * Voice Engine: Web Speech API (webkitSpeechRecognition fallback).
+ *
+ * Stage 3: Two-Hand Playing, Strum Velocity, Palm Mute, Strum Direction,
+ *          Hammer-on / Pull-off, and Musical Expression.
  */
 
 import { HandLandmarker, FilesetResolver }
@@ -17,17 +20,17 @@ import { HandLandmarker, FilesetResolver }
 // CHORD CONFIGURATION
 // ═══════════════════════════════════════════════════════════════════════════
 const CHORD_CONFIG = {
-  0: { name: "Mute", full: "Silence",  color: "#8a99ad", freqs: [], file: null },
+  0: { name: "Mute", full: "Silence",  color: "#8a99ad", freqs: [], stringIndices: [], file: null },
   1: { name: "Em",   full: "E Minor",  color: "#ff5a5a",
-       freqs: [82.41, 123.47, 164.81, 196.00, 246.94, 329.63], file: "guitar_em.wav" },
+       freqs: [82.41, 123.47, 164.81, 196.00, 246.94, 329.63], stringIndices: [0, 1, 2, 3, 4, 5], file: "guitar_em.wav" },
   2: { name: "Am",   full: "A Minor",  color: "#ffa53c",
-       freqs: [110.00, 164.81, 220.00, 261.63, 329.63], file: "guitar_am.wav" },
+       freqs: [110.00, 164.81, 220.00, 261.63, 329.63], stringIndices: [1, 2, 3, 4, 5], file: "guitar_am.wav" },
   3: { name: "C",    full: "C Major",  color: "#50dc78",
-       freqs: [130.81, 164.81, 196.00, 261.63, 329.63], file: "guitar_c.wav" },
+       freqs: [130.81, 164.81, 196.00, 261.63, 329.63], stringIndices: [1, 2, 3, 4, 5], file: "guitar_c.wav" },
   4: { name: "D",    full: "D Major",  color: "#50a0ff",
-       freqs: [146.83, 220.00, 293.66, 369.99], file: "guitar_d.wav" },
+       freqs: [146.83, 220.00, 293.66, 369.99], stringIndices: [2, 3, 4, 5], file: "guitar_d.wav" },
   5: { name: "G",    full: "G Major",  color: "#c850ff",
-       freqs: [98.00, 123.47, 196.00, 246.94, 329.63, 392.00], file: "guitar_g.wav" }
+       freqs: [98.00, 123.47, 196.00, 246.94, 329.63, 392.00], stringIndices: [0, 1, 2, 3, 4, 5], file: "guitar_g.wav" }
 };
 
 const HAND_CONNECTIONS = [
@@ -40,12 +43,81 @@ const HAND_CONNECTIONS = [
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════
-// STATE
+// STATE & SOUND PRESETS (Stage 2)
 // ═══════════════════════════════════════════════════════════════════════════
-let audioCtx          = null;
-const guitarBuffers   = {};
-let activeSourceNode  = null;
-let soundsSynthesized = false;
+const GUITAR_PRESETS = {
+  nylon: {
+    id: "nylon",
+    name: "Warm Nylon",
+    icon: "🪵",
+    model: "nylon",
+    desc: "Warm Nylon • Intimate Classical Tone",
+    toneBrightness: -2.5, // dB
+    bodyLowGain: 3.5,     // dB
+    presenceGain: 0.0,    // dB
+    reverbWet: 0.14,      // 14%
+    reverbDecay: 1.4,     // s
+    sustainScale: 1.0,
+    ambientMode: false,
+    compThreshold: -15,
+    compRatio: 2.2
+  },
+  bright: {
+    id: "bright",
+    name: "Bright Acoustic",
+    icon: "✨",
+    model: "steel",
+    desc: "Bright Acoustic • Steel-String Chime",
+    toneBrightness: 3.5,  // dB
+    bodyLowGain: 1.8,     // dB
+    presenceGain: 2.8,    // dB
+    reverbWet: 0.09,      // 9%
+    reverbDecay: 1.1,     // s
+    sustainScale: 0.85,
+    ambientMode: false,
+    compThreshold: -18,
+    compRatio: 2.8
+  },
+  ambient: {
+    id: "ambient",
+    name: "Dreamy Ambient",
+    icon: "🌌",
+    model: "ambient",
+    desc: "Dreamy Ambient • Ethereal Sustain & Lush Space",
+    toneBrightness: 0.5,   // dB
+    bodyLowGain: 3.0,     // dB
+    presenceGain: 1.0,    // dB
+    reverbWet: 0.38,      // 38%
+    reverbDecay: 2.8,     // s
+    sustainScale: 1.9,
+    ambientMode: true,
+    compThreshold: -14,
+    compRatio: 3.0
+  }
+};
+
+const SOUND_SETTINGS = {
+  preset: "nylon",
+  volume: 0.85,
+  sustainScale: 1.0,
+  reverbWet: 0.14,
+  toneOffset: 0.0,
+  ambientSustain: false
+};
+
+let audioCtx            = null;
+let effectsChain        = null;
+let roomImpulseBuffer   = null;
+let ambientImpulseBuffer = null;
+const stringBufferBanks = {
+  nylon: {},
+  steel: {},
+  ambient: {}
+};
+const activeVoices      = new Set();
+let pendingStrumTimers  = [];
+let soundsSynthesized   = false;
+let roundRobinIndex     = 0;
 
 let handLandmarker    = null;
 let modelReady        = false;
@@ -62,15 +134,46 @@ let rafId             = null;
 
 let currentChord      = 0;
 let lastChord         = -1;
-
-const DEBOUNCE_N      = 3; // Smaller window = faster response (matches main.py DEBOUNCE_WINDOW_SIZE)
-let gestureHistory    = [];
+let candidateChord    = 0;
+let candidateCount    = 0;
+const STABILITY_THRESHOLD = 3; // 3 consecutive frames confirms chord transition (~90-110ms)
 
 let speechRec         = null;
 let voiceActive       = false;
 
 let vibAmps           = [0,0,0,0,0,0];
 let cameraStarting    = false;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: TWO-HAND PLAYING STATE
+// ═══════════════════════════════════════════════════════════════════════════
+let twoHandMode       = false;  // true when 2 hands are detected
+
+// Strum hand (right) tracking
+const strumHistory    = [];     // [{y, t}] — wrist y-position history
+const STRUM_HISTORY_MAX = 12;
+let lastStrumTime     = 0;
+const STRUM_COOLDOWN_MS = 120;  // ms between strum triggers
+let lastStrumDirection = "down";
+let strumVelocity     = 0;      // 0..1 normalized strum speed
+
+// Palm mute detection
+let isPalmMuting      = false;
+let palmMuteStartTime = 0;
+
+// Hammer-on / Pull-off (chord hand finger changes without strum)
+let prevChordFingerCount = 0;
+let hammerOnCooldown     = 0;
+
+// Expression display state
+let expressionLabel   = "";
+let expressionFade    = 0;
+
+// Hand role assignment
+let chordHandLandmarks = null;
+let strumHandLandmarks = null;
+let chordHandedness    = "";    // "Left" or "Right"
+let strumHandedness    = "";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BOOT
@@ -87,11 +190,12 @@ document.addEventListener("DOMContentLoaded", () => {
   requestAnimationFrame(animateStrings);
 
   bindUI();
+  syncStudioUI();
   loadMediaPipeModel();
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// AUDIO ENGINE (Plucked Nylon Guitar Synthesis + Instant Buffer Caching)
+// AUDIO ENGINE (Acoustic Physical Modeling & Modular Effects Studio)
 // ═══════════════════════════════════════════════════════════════════════════
 function ensureAudioCtx() {
   if (!audioCtx) {
@@ -103,135 +207,714 @@ function ensureAudioCtx() {
   buildGuitarChordBuffers();
 }
 
-function buildGuitarChordBuffers() {
-  if (soundsSynthesized || !audioCtx) return;
-  soundsSynthesized = true;
+/**
+ * Synthesizes a natural stereo acoustic room impulse response buffer.
+ */
+function generateReverbImpulse(ctx, durationSec, decay) {
+  const sampleRate = ctx.sampleRate;
+  const length = Math.floor(sampleRate * durationSec);
+  const impulse = ctx.createBuffer(2, length, sampleRate);
+  const left = impulse.getChannelData(0);
+  const right = impulse.getChannelData(1);
 
-  for (const [idStr, cfg] of Object.entries(CHORD_CONFIG)) {
-    const id = parseInt(idStr, 10);
-    if (id === 0 || !cfg.freqs || cfg.freqs.length === 0) continue;
-    try {
-      guitarBuffers[id] = generateGuitarChordBuffer(audioCtx, cfg.freqs);
-    } catch (err) {
-      console.warn(`[Guitar Synth Error for chord ${cfg.name}]:`, err);
+  const earlyReflections = [
+    { delay: 0.012, gainL: 0.50, gainR: 0.30 },
+    { delay: 0.021, gainL: 0.35, gainR: 0.45 },
+    { delay: 0.033, gainL: 0.30, gainR: 0.25 },
+    { delay: 0.048, gainL: 0.22, gainR: 0.28 }
+  ];
+
+  for (let i = 0; i < length; i++) {
+    const t = i / sampleRate;
+    const env = Math.exp(-t * (6.91 / decay));
+    const damping = Math.exp(-t * 2.5);
+
+    left[i] = (Math.random() * 2 - 1) * env * (0.6 + 0.4 * damping);
+    right[i] = (Math.random() * 2 - 1) * env * (0.6 + 0.4 * damping);
+  }
+
+  for (const ref of earlyReflections) {
+    const idx = Math.floor(ref.delay * sampleRate);
+    if (idx < length) {
+      left[idx] += ref.gainL * 0.4;
+      right[idx] += ref.gainR * 0.4;
     }
   }
 
-  preloadStaticWavs();
-}
-
-async function preloadStaticWavs() {
-  for (const [idStr, cfg] of Object.entries(CHORD_CONFIG)) {
-    const id = parseInt(idStr, 10);
-    if (!cfg.file) continue;
-    try {
-      const res = await fetch(`sounds/${cfg.file}`);
-      if (res.ok) {
-        const buf = await res.arrayBuffer();
-        const decoded = await audioCtx.decodeAudioData(buf);
-        guitarBuffers[id] = decoded;
-      }
-    } catch (_) {}
+  let peak = 0;
+  for (let i = 0; i < length; i++) {
+    const aL = Math.abs(left[i]);
+    const aR = Math.abs(right[i]);
+    if (aL > peak) peak = aL;
+    if (aR > peak) peak = aR;
   }
+  if (peak > 1e-5) {
+    for (let i = 0; i < length; i++) {
+      left[i] /= peak;
+      right[i] /= peak;
+    }
+  }
+
+  return impulse;
 }
 
 /**
- * Classical Guitar Nylon-String Synthesis (matches guitar_sounds.py)
+ * Initializes the modular guitar effects chain:
+ * Strings -> Stereo Pan -> EQ (Low/Mid/High) -> Dynamic Compressor
+ *         -> Parallel Reverb (Dry/Wet) -> Master Gain -> Peak Limiter -> Destination
  */
-function generateGuitarChordBuffer(ctx, freqs, duration = 3.5) {
+function initGuitarAcoustics(ctx) {
+  if (effectsChain) return effectsChain;
+
+  // 1. Voice Summing Input Bus
+  const voiceBus = ctx.createGain();
+  voiceBus.gain.value = 1.0;
+
+  // 2. Equalization Stage:
+  // Low Shelf (110 Hz Body Warmth)
+  const eqLowShelf = ctx.createBiquadFilter();
+  eqLowShelf.type = "lowshelf";
+  eqLowShelf.frequency.value = 110;
+  eqLowShelf.gain.value = 3.5;
+
+  // De-Mud Notch (400 Hz)
+  const eqDeMud = ctx.createBiquadFilter();
+  eqDeMud.type = "peaking";
+  eqDeMud.frequency.value = 400;
+  eqDeMud.Q.value = 1.6;
+  eqDeMud.gain.value = -2.0;
+
+  // Soundboard Spruce Top-Plate Resonance (212 Hz)
+  const eqTopPlate = ctx.createBiquadFilter();
+  eqTopPlate.type = "peaking";
+  eqTopPlate.frequency.value = 212;
+  eqTopPlate.Q.value = 2.8;
+  eqTopPlate.gain.value = 3.2;
+
+  // Presence Bite (3200 Hz) - active on steel acoustic
+  const eqPresence = ctx.createBiquadFilter();
+  eqPresence.type = "peaking";
+  eqPresence.frequency.value = 3200;
+  eqPresence.Q.value = 1.8;
+  eqPresence.gain.value = 0.0;
+
+  // Tone Brightness High Shelf (4500 Hz)
+  const eqToneBrightness = ctx.createBiquadFilter();
+  eqToneBrightness.type = "highshelf";
+  eqToneBrightness.frequency.value = 4500;
+  eqToneBrightness.gain.value = -2.5;
+
+  // 3. Dynamic Compressor Stage (transparent dynamics control)
+  const compressor = ctx.createDynamicsCompressor();
+  compressor.threshold.value = -15.0; // dB
+  compressor.knee.value = 14.0;      // soft knee
+  compressor.ratio.value = 2.4;
+  compressor.attack.value = 0.015;    // 15 ms
+  compressor.release.value = 0.180;   // 180 ms
+
+  // 4. Natural Acoustic Reverb Stage (Parallel Dry/Wet)
+  roomImpulseBuffer = generateReverbImpulse(ctx, 1.6, 1.4);
+  ambientImpulseBuffer = generateReverbImpulse(ctx, 3.0, 2.8);
+
+  const convolver = ctx.createConvolver();
+  convolver.buffer = roomImpulseBuffer;
+
+  const dryGain = ctx.createGain();
+  dryGain.gain.value = 1.0 - SOUND_SETTINGS.reverbWet;
+
+  const wetGain = ctx.createGain();
+  wetGain.gain.value = SOUND_SETTINGS.reverbWet;
+
+  const postFxSum = ctx.createGain();
+  postFxSum.gain.value = 1.0;
+
+  // 5. Master Output Gain
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = SOUND_SETTINGS.volume;
+
+  // 6. Peak Protection Limiter Stage (Brickwall Limiter + Soft Saturation)
+  const limiter = ctx.createDynamicsCompressor();
+  limiter.threshold.value = -1.0; // dB
+  limiter.knee.value = 0.0;       // hard knee brickwall
+  limiter.ratio.value = 20.0;
+  limiter.attack.value = 0.002;   // 2 ms fast clamp
+  limiter.release.value = 0.050;  // 50 ms fast recovery
+
+  const waveShaper = ctx.createWaveShaper();
+  waveShaper.curve = makeWarmSaturationCurve(1024);
+  waveShaper.oversample = "2x";
+
+  // Connect Audio Graph:
+  voiceBus.connect(eqLowShelf);
+  eqLowShelf.connect(eqDeMud);
+  eqDeMud.connect(eqTopPlate);
+  eqTopPlate.connect(eqPresence);
+  eqPresence.connect(eqToneBrightness);
+  eqToneBrightness.connect(compressor);
+
+  // Split after compressor into Dry and Wet paths:
+  compressor.connect(dryGain);
+  dryGain.connect(postFxSum);
+
+  compressor.connect(convolver);
+  convolver.connect(wetGain);
+  wetGain.connect(postFxSum);
+
+  // Sum -> masterGain -> limiter -> waveShaper -> destination
+  postFxSum.connect(masterGain);
+  masterGain.connect(limiter);
+  limiter.connect(waveShaper);
+  waveShaper.connect(ctx.destination);
+
+  effectsChain = {
+    voiceBus,
+    eqLowShelf,
+    eqDeMud,
+    eqTopPlate,
+    eqPresence,
+    eqToneBrightness,
+    compressor,
+    convolver,
+    dryGain,
+    wetGain,
+    postFxSum,
+    masterGain,
+    limiter,
+    waveShaper
+  };
+
+  return effectsChain;
+}
+
+function makeWarmSaturationCurve(n_samples = 1024) {
+  const curve = new Float32Array(n_samples);
+  for (let i = 0; i < n_samples; i++) {
+    const x = (i * 2) / (n_samples - 1) - 1;
+    curve[i] = Math.tanh(1.25 * x) / Math.tanh(1.25);
+  }
+  return curve;
+}
+
+/**
+ * Enhanced Karplus-Strong Physical Modeling Plucked String Synthesizer
+ * Supports physical models: 'nylon', 'steel', and 'ambient'
+ */
+function renderPhysicalString(ctx, freq, durationSec, options = {}) {
+  const {
+    instrumentType = "nylon",
+    velocity = 0.88,
+    pluckPos = 0.17,
+    brightness = 0.50,
+    detuneCents = 0.0
+  } = options;
+
+  const isSteel = (instrumentType === "steel");
+  const isAmbient = (instrumentType === "ambient");
+
   const sampleRate = ctx.sampleRate;
-  const numSamples = Math.floor(duration * sampleRate);
-  const buffer = ctx.createBuffer(1, numSamples, sampleRate);
-  const data = buffer.getChannelData(0);
+  const actualFreq = freq * Math.pow(2, detuneCents / 1200);
+  const totalSamples = Math.floor(durationSec * sampleRate);
 
-  const strumSpan = 0.055;
-  const strumStep = strumSpan / Math.max(freqs.length - 1, 1);
+  const period = sampleRate / actualFreq;
+  const N = Math.floor(period);
+  const frac = period - N;
+  const allpassC = (1 - frac) / (1 + frac);
 
-  const harmonicAmps = [1.00, 0.38, 0.16, 0.07, 0.03];
-  const detuneCents  = [-2.0, 0.0, 2.0];
-  const detuneGains  = [0.25, 1.00, 0.25];
-  const totalGain    = 1.5;
+  const normF = Math.max(0, Math.min(1, (actualFreq - 80) / 320));
 
-  for (let sIdx = 0; sIdx < freqs.length; sIdx++) {
-    const freq = freqs[sIdx];
-    const onsetSec = sIdx * strumStep;
-    const onsetSample = Math.floor(onsetSec * sampleRate);
+  let t60 = 4.6 - normF * 1.8;
+  if (isAmbient) {
+    t60 = 7.5 - normF * 1.5;
+  } else if (isSteel) {
+    t60 = 3.6 - normF * 1.2;
+  }
 
-    const normF = Math.max(0, Math.min(1, (freq - 80) / 320));
-    const decayRate = 0.25 + normF * 0.45;
+  const lossFactor = Math.pow(0.001, 1.0 / (t60 * actualFreq));
 
-    for (let i = onsetSample; i < numSamples; i++) {
-      const t = (i - onsetSample) / sampleRate;
+  const loopDamp = isSteel
+    ? (0.14 + 0.12 * (1 - normF * 0.5))
+    : (0.23 + 0.20 * (1 - normF * 0.7));
 
-      // Soft fingertip attack (12ms)
-      let att = 1.0;
-      if (t < 0.012) {
-        att = Math.sin((Math.PI / 2) * (t / 0.012));
-      }
+  const line1 = new Float64Array(N + 2);
+  const line2 = new Float64Array(N + 2);
 
-      const env = Math.exp(-decayRate * t);
+  const period2 = sampleRate / (actualFreq + (isAmbient ? 0.85 : 0.55));
+  const N2 = Math.floor(period2);
+  const frac2 = period2 - N2;
+  const allpassC2 = (1 - frac2) / (1 + frac2);
 
-      let val = 0.0;
-      for (let d = 0; d < 3; d++) {
-        const dc = detuneCents[d];
-        const dg = detuneGains[d];
-        const f0 = freq * Math.pow(2, dc / 1200);
+  const excMs = isSteel ? 0.0022 : (isAmbient ? 0.0045 : 0.0035);
+  const excLen = Math.min(N, Math.max(20, Math.floor(sampleRate * (excMs + (1 - velocity) * 0.002))));
+  const effPluckPos = isSteel ? 0.14 : pluckPos;
+  const pickOffset = Math.max(1, Math.floor(period * effPluckPos));
+  const rawExc = new Float64Array(excLen);
 
-        for (let h = 0; h < harmonicAmps.length; h++) {
-          const hNum = h + 1;
-          const amp = harmonicAmps[h];
-          val += dg * amp * Math.sin(2 * Math.PI * f0 * hNum * t);
-        }
-      }
+  for (let i = 0; i < excLen; i++) {
+    const t = i / excLen;
+    const win = 0.5 * (1 - Math.cos(2 * Math.PI * t));
+    const tri = t < effPluckPos ? (t / effPluckPos) : ((1 - t) / (1 - effPluckPos));
+    const noise = (Math.random() * 2 - 1) * (isSteel ? 0.45 : 0.30);
+    rawExc[i] = (tri * 0.75 + noise) * win * velocity;
+  }
 
-      const sig = (val / totalGain) * env;
-      data[i] += att * sig;
+  const combDepth = isSteel ? 0.94 : 0.88;
+  for (let i = excLen - 1; i >= 0; i--) {
+    if (i >= pickOffset) {
+      rawExc[i] -= combDepth * rawExc[i - pickOffset];
     }
   }
 
-  // Soft tanh saturation for warm body resonance & peak normalization
-  let maxVal = 0;
-  for (let i = 0; i < numSamples; i++) {
-    const absV = Math.abs(data[i]);
-    if (absV > maxVal) maxVal = absV;
-  }
-  if (maxVal < 1e-6) maxVal = 1;
+  let excFilt = 0;
+  const excCutoff = isSteel
+    ? (0.42 + velocity * 0.48 + brightness * 0.20)
+    : (0.28 + velocity * 0.45 + brightness * 0.15);
 
-  for (let i = 0; i < numSamples; i++) {
-    const normVal = data[i] / maxVal;
-    data[i] = Math.tanh(1.8 * normVal) * 0.85;
+  for (let i = 0; i < excLen; i++) {
+    excFilt += Math.min(0.95, excCutoff) * (rawExc[i] - excFilt);
+    line1[i] = excFilt * 0.85;
+    line2[i] = excFilt * (isAmbient ? 0.50 : 0.35);
+  }
+
+  const buffer = ctx.createBuffer(1, totalSamples, sampleRate);
+  const channelData = buffer.getChannelData(0);
+
+  let readIdx1 = 0, readIdx2 = 0;
+  let lpPrev1 = 0, lpPrev2 = 0;
+  let apPrevIn1 = 0, apPrevOut1 = 0;
+  let apPrevIn2 = 0, apPrevOut2 = 0;
+  const couple = isAmbient ? 0.024 : 0.015;
+
+  for (let n = 0; n < totalSamples; n++) {
+    const s1 = line1[readIdx1];
+    const interp1 = allpassC * (s1 - apPrevOut1) + apPrevIn1;
+    apPrevIn1 = s1;
+    apPrevOut1 = interp1;
+    const damp1 = (1 - loopDamp) * interp1 + loopDamp * lpPrev1;
+    lpPrev1 = damp1;
+
+    const s2 = line2[readIdx2];
+    const interp2 = allpassC2 * (s2 - apPrevOut2) + apPrevIn2;
+    apPrevIn2 = s2;
+    apPrevOut2 = interp2;
+    const damp2 = (1 - (loopDamp * 0.85)) * interp2 + (loopDamp * 0.85) * lpPrev2;
+    lpPrev2 = damp2;
+
+    const next1 = (damp1 * (1 - couple) + damp2 * couple) * lossFactor;
+    const next2 = (damp2 * (1 - couple) + damp1 * couple) * (lossFactor * 0.9995);
+
+    line1[readIdx1] = next1;
+    line2[readIdx2] = next2;
+
+    channelData[n] = (interp1 * 0.78 + interp2 * 0.38);
+
+    readIdx1++;
+    if (readIdx1 >= N) readIdx1 = 0;
+    readIdx2++;
+    if (readIdx2 >= N2) readIdx2 = 0;
+  }
+
+  let prevX = 0, prevY = 0;
+  const R = 0.995;
+  let peak = 0;
+  for (let i = 0; i < totalSamples; i++) {
+    const x = channelData[i];
+    const y = x - prevX + R * prevY;
+    prevX = x;
+    prevY = y;
+    channelData[i] = y;
+    const absY = Math.abs(y);
+    if (absY > peak) peak = absY;
+  }
+
+  if (peak > 1e-5) {
+    const scale = 0.90 / peak;
+    for (let i = 0; i < totalSamples; i++) {
+      channelData[i] *= scale;
+    }
   }
 
   return buffer;
 }
 
-function playChord(chordId) {
-  ensureAudioCtx();
+function buildGuitarChordBuffers() {
+  if (soundsSynthesized || !audioCtx) return;
+  soundsSynthesized = true;
 
-  if (activeSourceNode) {
-    try {
-      activeSourceNode.stop();
-      activeSourceNode.disconnect();
-    } catch (_) {}
-    activeSourceNode = null;
+  initGuitarAcoustics(audioCtx);
+
+  const uniqueFreqs = new Set();
+  for (const cfg of Object.values(CHORD_CONFIG)) {
+    if (cfg.freqs) {
+      cfg.freqs.forEach(f => uniqueFreqs.add(f));
+    }
   }
 
-  if (chordId === 0 || !CHORD_CONFIG[chordId]) return;
+  const models = ["nylon", "steel", "ambient"];
 
-  kickStrings();
+  for (const model of models) {
+    stringBufferBanks[model] = {};
+    for (const freq of uniqueFreqs) {
+      const freqKey = freq.toFixed(2);
+      stringBufferBanks[model][freqKey] = [];
 
-  const buf = guitarBuffers[chordId];
-  if (buf) {
+      let dur = freq < 150 ? 4.5 : (freq < 250 ? 3.8 : 3.2);
+      if (model === "ambient") dur = Math.min(7.5, dur * 1.8);
+      else if (model === "steel") dur = Math.max(2.5, dur * 0.85);
+
+      // Variation 0: Standard touch
+      stringBufferBanks[model][freqKey].push(
+        renderPhysicalString(audioCtx, freq, dur, {
+          instrumentType: model,
+          velocity: 0.88,
+          pluckPos: 0.17,
+          brightness: 0.50,
+          detuneCents: 0.0
+        })
+      );
+
+      // Variation 1: Firmer attack
+      stringBufferBanks[model][freqKey].push(
+        renderPhysicalString(audioCtx, freq, dur, {
+          instrumentType: model,
+          velocity: 0.94,
+          pluckPos: 0.15,
+          brightness: 0.62,
+          detuneCents: 0.8
+        })
+      );
+
+      // Variation 2: Softer touch
+      stringBufferBanks[model][freqKey].push(
+        renderPhysicalString(audioCtx, freq, dur, {
+          instrumentType: model,
+          velocity: 0.80,
+          pluckPos: 0.19,
+          brightness: 0.40,
+          detuneCents: -0.8
+        })
+      );
+    }
+  }
+
+  console.log(`[Guitar Engine] Synthesized multi-preset physical string soundbanks in memory.`);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: VELOCITY-SENSITIVE CHORD PLAYBACK
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Play a chord with velocity and strum direction awareness.
+ * @param {number} chordId - The chord to play (0-5)
+ * @param {object} [expression] - Optional expression parameters
+ * @param {number} [expression.velocity] - 0..1 strum velocity (default 0.85)
+ * @param {string} [expression.direction] - "down" or "up" strum direction
+ * @param {boolean} [expression.hammerOn] - true if this is a hammer-on (softer, no strum attack)
+ * @param {boolean} [expression.pullOff] - true if this is a pull-off (softer, descending)
+ */
+function playChord(chordId, expression = {}) {
+  ensureAudioCtx();
+
+  pendingStrumTimers.forEach(id => clearTimeout(id));
+  pendingStrumTimers = [];
+
+  const now = audioCtx.currentTime;
+
+  const vel = expression.velocity !== undefined ? expression.velocity : 0.85;
+  const direction = expression.direction || "down";
+  const isHammerOn = expression.hammerOn || false;
+  const isPullOff = expression.pullOff || false;
+
+  // 1. If MUTE (chord 0 / Fist)
+  if (chordId === 0 || !CHORD_CONFIG[chordId]) {
+    activeVoices.forEach(voice => voice.fadeAndDispose(0.065));
+    return;
+  }
+
+  // 2. If changing to a new chord:
+  const releaseSec = SOUND_SETTINGS.ambientSustain ? 0.15 : 0.075;
+  activeVoices.forEach(voice => voice.fadeAndDispose(releaseSec));
+
+  const cfg = CHORD_CONFIG[chordId];
+  if (!cfg.freqs || cfg.freqs.length === 0) return;
+
+  const strumStart = now + 0.004;
+  let curDelaySec = 0;
+  roundRobinIndex = (roundRobinIndex + 1) % 3;
+
+  const nStrings = cfg.freqs.length;
+  const activePreset = GUITAR_PRESETS[SOUND_SETTINGS.preset] || GUITAR_PRESETS.nylon;
+  const bank = stringBufferBanks[activePreset.model] || stringBufferBanks.nylon;
+
+  const effectiveSustain = SOUND_SETTINGS.ambientSustain
+    ? Math.max(SOUND_SETTINGS.sustainScale, 1.8)
+    : SOUND_SETTINGS.sustainScale;
+
+  // Stage 3: Determine string order based on strum direction
+  const stringOrder = [];
+  for (let i = 0; i < nStrings; i++) stringOrder.push(i);
+  if (direction === "up") stringOrder.reverse();
+
+  // Stage 3: Velocity-influenced gain scaling
+  const velocityGainScale = 0.55 + vel * 0.45; // maps 0..1 -> 0.55..1.0
+
+  // Stage 3: Hammer-on / pull-off are softer with faster attack
+  const expressionGainMul = isHammerOn ? 0.60 : (isPullOff ? 0.50 : 1.0);
+
+  // Stage 3: Strum speed — faster strum = shorter inter-string delay
+  const baseStrumStepMs = isHammerOn || isPullOff
+    ? 8   // near-instant for legato techniques
+    : Math.max(10, Math.min(35, 28 - vel * 18)); // 10..28ms
+
+  for (let orderIdx = 0; orderIdx < nStrings; orderIdx++) {
+    const sIdx = stringOrder[orderIdx];
+    const freq = cfg.freqs[sIdx];
+    const freqKey = freq.toFixed(2);
+    const variations = bank[freqKey] || (stringBufferBanks.nylon && stringBufferBanks.nylon[freqKey]);
+    if (!variations || variations.length === 0) continue;
+
+    const stringIndex = (cfg.stringIndices && cfg.stringIndices[sIdx] !== undefined)
+      ? cfg.stringIndices[sIdx]
+      : sIdx;
+
+    const stringStartTime = strumStart + curDelaySec;
+    const varIdx = (roundRobinIndex + sIdx) % variations.length;
+    const buffer = variations[varIdx];
+
     const src = audioCtx.createBufferSource();
-    src.buffer = buf;
-    src.connect(audioCtx.destination);
-    src.start(0);
-    activeSourceNode = src;
+    src.buffer = buffer;
+
+    const microDetuneCents = (Math.random() * 2 - 1) * 1.2;
+    src.playbackRate.value = Math.pow(2, microDetuneCents / 1200);
+
+    // Stage 3: Velocity-aware per-string gain with position curve
+    const posInChord = sIdx / Math.max(1, nStrings - 1);
+    const baseVel = 0.90 - Math.sin(posInChord * Math.PI) * 0.12;
+    const velJitter = (Math.random() * 0.08 - 0.04);
+    const stringGain = Math.max(0.35, Math.min(1.0, baseVel + velJitter))
+      * 0.42 * velocityGainScale * expressionGainMul;
+
+    const voiceGain = audioCtx.createGain();
+    voiceGain.gain.setValueAtTime(stringGain, stringStartTime);
+
+    // Dynamic sustain decay envelope — hammer-on has gentler attack
+    const baseDur = buffer.duration;
+    const noteLifetime = baseDur * effectiveSustain;
+
+    if (isHammerOn) {
+      // Smooth fade-in for hammer-on (legato feel)
+      voiceGain.gain.setValueAtTime(0.0001, stringStartTime);
+      voiceGain.gain.exponentialRampToValueAtTime(stringGain, stringStartTime + 0.025);
+    }
+
+    voiceGain.gain.setTargetAtTime(0.0001, stringStartTime + 0.08, noteLifetime * 0.32);
+
+    // Subtle Stereo Panning per string (-0.14 on bass to +0.14 on high treble)
+    let pannerNode = null;
+    if (audioCtx.createStereoPanner) {
+      pannerNode = audioCtx.createStereoPanner();
+      const panVal = ((sIdx / Math.max(1, nStrings - 1)) * 2 - 1) * 0.14;
+      pannerNode.pan.setValueAtTime(panVal, stringStartTime);
+    }
+
+    // Connect voice:
+    src.connect(voiceGain);
+    if (pannerNode) {
+      voiceGain.connect(pannerNode);
+      pannerNode.connect(effectsChain.voiceBus);
+    } else {
+      voiceGain.connect(effectsChain.voiceBus);
+    }
+
+    // Cap polyphony
+    if (activeVoices.size >= 28) {
+      const oldest = activeVoices.values().next().value;
+      if (oldest) oldest.fadeAndDispose(0.04);
+    }
+
+    const voice = {
+      source: src,
+      gainNode: voiceGain,
+      panner: pannerNode,
+      fadeAndDispose: (fadeTime = 0.075) => {
+        try {
+          const t = audioCtx.currentTime;
+          voiceGain.gain.cancelScheduledValues(t);
+          voiceGain.gain.setValueAtTime(voiceGain.gain.value, t);
+          voiceGain.gain.exponentialRampToValueAtTime(0.0001, t + fadeTime);
+          setTimeout(() => {
+            try {
+              src.stop();
+              src.disconnect();
+              voiceGain.disconnect();
+              if (pannerNode) pannerNode.disconnect();
+            } catch (_) {}
+            activeVoices.delete(voice);
+          }, Math.round((fadeTime + 0.015) * 1000));
+        } catch (_) {
+          activeVoices.delete(voice);
+        }
+      }
+    };
+
+    src.onended = () => voice.fadeAndDispose(0.01);
+    activeVoices.add(voice);
+
+    src.start(stringStartTime);
+
+    // Schedule visual string vibration
+    const delayMs = Math.round(curDelaySec * 1000);
+    const timerId = setTimeout(() => {
+      kickStringIndex(stringIndex);
+    }, delayMs);
+    pendingStrumTimers.push(timerId);
+
+    const stepMs = baseStrumStepMs + Math.floor(Math.random() * 4);
+    curDelaySec += stepMs / 1000;
+  }
+}
+
+// ── Sound Settings Controls ────────────────────────────────────────────────
+function applySoundPreset(presetId) {
+  const p = GUITAR_PRESETS[presetId];
+  if (!p || !effectsChain || !audioCtx) return;
+
+  SOUND_SETTINGS.preset = presetId;
+  SOUND_SETTINGS.reverbWet = p.reverbWet;
+  SOUND_SETTINGS.sustainScale = p.sustainScale;
+  SOUND_SETTINGS.ambientSustain = p.ambientMode;
+
+  const now = audioCtx.currentTime;
+
+  effectsChain.eqLowShelf.gain.setTargetAtTime(p.bodyLowGain, now, 0.04);
+  effectsChain.eqPresence.gain.setTargetAtTime(p.presenceGain, now, 0.04);
+  effectsChain.eqToneBrightness.gain.setTargetAtTime(p.toneBrightness + SOUND_SETTINGS.toneOffset, now, 0.04);
+
+  effectsChain.compressor.threshold.setTargetAtTime(p.compThreshold, now, 0.04);
+  effectsChain.compressor.ratio.setTargetAtTime(p.compRatio, now, 0.04);
+
+  if (p.id === "ambient" && ambientImpulseBuffer) {
+    effectsChain.convolver.buffer = ambientImpulseBuffer;
+  } else if (roomImpulseBuffer) {
+    effectsChain.convolver.buffer = roomImpulseBuffer;
+  }
+
+  effectsChain.dryGain.gain.setTargetAtTime(1.0 - p.reverbWet, now, 0.04);
+  effectsChain.wetGain.gain.setTargetAtTime(p.reverbWet, now, 0.04);
+
+  syncStudioUI();
+}
+
+function updateMasterVolume(val) {
+  const v = Math.max(0, Math.min(100, val)) / 100;
+  SOUND_SETTINGS.volume = v;
+  if (effectsChain && audioCtx) {
+    effectsChain.masterGain.gain.setTargetAtTime(v, audioCtx.currentTime, 0.03);
+  }
+  const el = document.getElementById("val-volume");
+  if (el) el.textContent = `${Math.round(v * 100)}%`;
+}
+
+function updateSustain(val) {
+  const scale = Math.max(50, Math.min(220, val)) / 100;
+  SOUND_SETTINGS.sustainScale = scale;
+  const el = document.getElementById("val-sustain");
+  if (el) el.textContent = `${scale.toFixed(2)}x`;
+}
+
+function updateReverbWet(val) {
+  const wet = Math.max(0, Math.min(50, val)) / 100;
+  SOUND_SETTINGS.reverbWet = wet;
+  if (effectsChain && audioCtx) {
+    const now = audioCtx.currentTime;
+    effectsChain.dryGain.gain.setTargetAtTime(1.0 - wet, now, 0.03);
+    effectsChain.wetGain.gain.setTargetAtTime(wet, now, 0.03);
+  }
+  const el = document.getElementById("val-reverb");
+  if (el) el.textContent = `${Math.round(wet * 100)}%`;
+}
+
+function updateToneBrightness(val) {
+  const dB = Math.max(-60, Math.min(60, val)) / 10;
+  SOUND_SETTINGS.toneOffset = dB;
+  const p = GUITAR_PRESETS[SOUND_SETTINGS.preset] || GUITAR_PRESETS.nylon;
+  const totalDb = p.toneBrightness + dB;
+  if (effectsChain && audioCtx) {
+    effectsChain.eqToneBrightness.gain.setTargetAtTime(totalDb, audioCtx.currentTime, 0.03);
+  }
+  const el = document.getElementById("val-tone");
+  if (el) el.textContent = `${dB >= 0 ? "+" : ""}${dB.toFixed(1)} dB`;
+}
+
+function toggleAmbientSustain(forceState) {
+  const newState = (typeof forceState === "boolean") ? forceState : !SOUND_SETTINGS.ambientSustain;
+  SOUND_SETTINGS.ambientSustain = newState;
+
+  if (newState) {
+    if (effectsChain && audioCtx) {
+      if (ambientImpulseBuffer) effectsChain.convolver.buffer = ambientImpulseBuffer;
+      const wet = Math.max(SOUND_SETTINGS.reverbWet, 0.32);
+      effectsChain.dryGain.gain.setTargetAtTime(1.0 - wet, audioCtx.currentTime, 0.04);
+      effectsChain.wetGain.gain.setTargetAtTime(wet, audioCtx.currentTime, 0.04);
+    }
+  } else {
+    const p = GUITAR_PRESETS[SOUND_SETTINGS.preset] || GUITAR_PRESETS.nylon;
+    if (effectsChain && audioCtx) {
+      if (p.id !== "ambient" && roomImpulseBuffer) effectsChain.convolver.buffer = roomImpulseBuffer;
+      effectsChain.dryGain.gain.setTargetAtTime(1.0 - SOUND_SETTINGS.reverbWet, audioCtx.currentTime, 0.04);
+      effectsChain.wetGain.gain.setTargetAtTime(SOUND_SETTINGS.reverbWet, audioCtx.currentTime, 0.04);
+    }
+  }
+
+  syncStudioUI();
+}
+
+function syncStudioUI() {
+  const p = GUITAR_PRESETS[SOUND_SETTINGS.preset] || GUITAR_PRESETS.nylon;
+
+  const descEl = document.getElementById("active-preset-desc");
+  if (descEl) descEl.textContent = p.desc;
+
+  document.querySelectorAll(".preset-pill").forEach(btn => {
+    const isAct = (btn.dataset.preset === SOUND_SETTINGS.preset);
+    btn.classList.toggle("active", isAct);
+    btn.setAttribute("aria-checked", isAct ? "true" : "false");
+  });
+
+  const ambBtn = document.getElementById("btn-ambient-quick");
+  if (ambBtn) ambBtn.classList.toggle("active", SOUND_SETTINGS.ambientSustain);
+
+  const slVol = document.getElementById("slider-volume");
+  if (slVol) {
+    slVol.value = Math.round(SOUND_SETTINGS.volume * 100);
+    const vEl = document.getElementById("val-volume");
+    if (vEl) vEl.textContent = `${slVol.value}%`;
+  }
+
+  const slSus = document.getElementById("slider-sustain");
+  if (slSus) {
+    slSus.value = Math.round(SOUND_SETTINGS.sustainScale * 100);
+    const sEl = document.getElementById("val-sustain");
+    if (sEl) sEl.textContent = `${SOUND_SETTINGS.sustainScale.toFixed(2)}x`;
+  }
+
+  const slRev = document.getElementById("slider-reverb");
+  if (slRev) {
+    slRev.value = Math.round(SOUND_SETTINGS.reverbWet * 100);
+    const rEl = document.getElementById("val-reverb");
+    if (rEl) rEl.textContent = `${slRev.value}%`;
+  }
+
+  const slTone = document.getElementById("slider-tone");
+  if (slTone) {
+    slTone.value = Math.round(SOUND_SETTINGS.toneOffset * 10);
+    const tEl = document.getElementById("val-tone");
+    if (tEl) tEl.textContent = `${SOUND_SETTINGS.toneOffset >= 0 ? "+" : ""}${SOUND_SETTINGS.toneOffset.toFixed(1)} dB`;
   }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MEDIAPIPE MODEL LOADING
+// MEDIAPIPE MODEL LOADING (Stage 3: numHands = 2)
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadMediaPipeModel() {
   const overlay  = document.getElementById("loading-overlay");
@@ -248,7 +931,7 @@ async function loadMediaPipeModel() {
         delegate
       },
       runningMode: "VIDEO",
-      numHands: 1
+      numHands: 2  // Stage 3: Track both hands
     });
   };
 
@@ -347,6 +1030,12 @@ function stopCamera() {
   outputCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
   updateFingerPills([false, false, false, false, false]);
   setChord(0);
+
+  // Reset two-hand state
+  twoHandMode = false;
+  chordHandLandmarks = null;
+  strumHandLandmarks = null;
+  updateHandModeUI();
 }
 
 async function flipCamera() {
@@ -358,7 +1047,7 @@ async function flipCamera() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FRAME PROCESSING & GESTURE DETECTION
+// STAGE 3: TWO-HAND FRAME PROCESSING & GESTURE DETECTION
 // ═══════════════════════════════════════════════════════════════════════════
 function processFrame() {
   if (!isCameraRunning) return;
@@ -371,25 +1060,308 @@ function processFrame() {
       const result = handLandmarker.detectForVideo(videoEl, now);
 
       if (result.landmarks && result.landmarks.length > 0) {
-        const lms = result.landmarks[0];
-        drawSkeleton(lms);
+        const handsDetected = result.landmarks.length;
+        const handedness = result.handedness || [];
 
-        const { states, count } = analyzeHandLandmarks(lms);
-        updateFingerPills(states);
+        if (handsDetected >= 2) {
+          // ── TWO-HAND MODE ──
+          twoHandMode = true;
 
-        gestureHistory.push(count);
-        if (gestureHistory.length > DEBOUNCE_N) gestureHistory.shift();
+          // Assign hands: chord hand (left in camera = right in reality due to mirror)
+          // and strum hand (right in camera = left in reality)
+          // MediaPipe reports handedness from the camera's perspective
+          const hand0Label = handedness[0]?.[0]?.categoryName || "Left";
+          const hand1Label = handedness[1]?.[0]?.categoryName || "Right";
 
-        setChord(majority(gestureHistory));
+          let chordIdx, strumIdx;
+
+          // In mirrored view: MediaPipe "Right" = user's left hand = chord hand
+          // MediaPipe "Left" = user's right hand = strum hand
+          if (hand0Label === "Right") {
+            chordIdx = 0;
+            strumIdx = 1;
+          } else if (hand1Label === "Right") {
+            chordIdx = 1;
+            strumIdx = 0;
+          } else {
+            // Fallback: leftmost hand (higher x in mirrored) is chord, rightmost is strum
+            const x0 = result.landmarks[0][0].x;
+            const x1 = result.landmarks[1][0].x;
+            chordIdx = x0 > x1 ? 0 : 1;
+            strumIdx = chordIdx === 0 ? 1 : 0;
+          }
+
+          chordHandLandmarks = result.landmarks[chordIdx];
+          strumHandLandmarks = result.landmarks[strumIdx];
+          chordHandedness = handedness[chordIdx]?.[0]?.categoryName || "?";
+          strumHandedness = handedness[strumIdx]?.[0]?.categoryName || "?";
+
+          // Draw both hand skeletons with different styling
+          drawDualHandSkeleton(chordHandLandmarks, strumHandLandmarks);
+
+          // Process chord hand (finger counting)
+          const { states, count } = analyzeHandLandmarks(chordHandLandmarks);
+          updateFingerPills(states);
+
+          // Process strum hand (motion + palm mute detection)
+          processStrumHand(strumHandLandmarks, now, count);
+
+          // Process chord changes for hammer-on / pull-off
+          processChordExpression(count, now);
+
+        } else {
+          // ── SINGLE HAND MODE (fallback to original behavior) ──
+          twoHandMode = false;
+          chordHandLandmarks = result.landmarks[0];
+          strumHandLandmarks = null;
+
+          const lms = result.landmarks[0];
+          drawSkeleton(lms);
+
+          const { states, count } = analyzeHandLandmarks(lms);
+          updateFingerPills(states);
+          handleDetectedCount(count);
+        }
+
+        updateHandModeUI();
+
       } else {
+        twoHandMode = false;
+        chordHandLandmarks = null;
+        strumHandLandmarks = null;
         updateFingerPills([false, false, false, false, false]);
-        setChord(0);
+        handleDetectedCount(0);
+        updateHandModeUI();
       }
     }
   }
 
   rafId = requestAnimationFrame(processFrame);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: STRUM HAND PROCESSING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Analyze the strum hand's wrist motion to detect strumming gestures.
+ * Uses wrist Y-position history to detect velocity and direction of strums.
+ */
+function processStrumHand(strumLms, nowMs, chordFingerCount) {
+  if (!strumLms || strumLms.length < 21) return;
+
+  const wristY = strumLms[0].y;   // normalized 0..1 (top to bottom)
+  const wristX = strumLms[0].x;
+
+  // Track wrist Y history
+  strumHistory.push({ y: wristY, x: wristX, t: nowMs });
+  while (strumHistory.length > STRUM_HISTORY_MAX) {
+    strumHistory.shift();
+  }
+
+  // ── Palm Mute Detection ──
+  // Open palm facing camera with all fingers spread = palm mute
+  const { states: strumFingerStates } = analyzeHandLandmarks(strumLms);
+  const allFingersOpen = strumFingerStates.filter(Boolean).length >= 4;
+  const palmOpenness = calculatePalmOpenness(strumLms);
+
+  if (allFingersOpen && palmOpenness > 0.65) {
+    if (!isPalmMuting) {
+      isPalmMuting = true;
+      palmMuteStartTime = nowMs;
+      // Immediately damp all active voices
+      activeVoices.forEach(voice => voice.fadeAndDispose(0.035));
+      triggerExpression("🤚 Palm Mute");
+    }
+    updateStrumHandUI("palm-mute");
+    return;
+  } else {
+    isPalmMuting = false;
+  }
+
+  // ── Strum Velocity Detection ──
+  if (strumHistory.length < 4) {
+    updateStrumHandUI("ready");
+    return;
+  }
+
+  // Calculate vertical velocity over last few frames
+  const recent = strumHistory.slice(-5);
+  const oldest = recent[0];
+  const newest = recent[recent.length - 1];
+  const dt = (newest.t - oldest.t) / 1000; // seconds
+
+  if (dt < 0.01) {
+    updateStrumHandUI("ready");
+    return;
+  }
+
+  const dy = newest.y - oldest.y;  // positive = moving down
+  const speed = Math.abs(dy) / dt; // units per second (normalized coords)
+
+  // Strum threshold: requires minimum speed
+  const STRUM_SPEED_THRESHOLD = 0.8; // normalized units/sec — requires meaningful hand movement
+
+  if (speed > STRUM_SPEED_THRESHOLD && (nowMs - lastStrumTime) > STRUM_COOLDOWN_MS) {
+    // Determine direction
+    const direction = dy > 0 ? "down" : "up";
+    lastStrumDirection = direction;
+
+    // Normalize velocity (0..1) — clamp between threshold and max expected speed
+    strumVelocity = Math.min(1.0, Math.max(0, (speed - STRUM_SPEED_THRESHOLD) / 3.5));
+
+    lastStrumTime = nowMs;
+
+    // Play the current chord with velocity and direction
+    if (currentChord > 0) {
+      playChord(currentChord, {
+        velocity: 0.5 + strumVelocity * 0.5, // map to 0.5..1.0
+        direction: direction
+      });
+
+      const dirIcon = direction === "down" ? "⬇" : "⬆";
+      const velPct = Math.round((0.5 + strumVelocity * 0.5) * 100);
+      triggerExpression(`${dirIcon} Strum ${velPct}%`);
+    }
+
+    updateStrumHandUI(`strum-${direction}`);
+  } else {
+    updateStrumHandUI("ready");
+  }
+}
+
+/**
+ * Calculate how "open" the palm is (0..1) based on finger spread.
+ */
+function calculatePalmOpenness(lms) {
+  if (!lms || lms.length < 21) return 0;
+
+  const tips = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky tips
+  const wrist = lms[0];
+
+  // Average distance of fingertips from wrist (normalized by hand scale)
+  const middleMcp = lms[9];
+  const handScale = Math.sqrt(
+    Math.pow(middleMcp.x - wrist.x, 2) +
+    Math.pow(middleMcp.y - wrist.y, 2)
+  );
+
+  if (handScale < 0.01) return 0;
+
+  let totalDist = 0;
+  for (const tip of tips) {
+    const dx = lms[tip].x - wrist.x;
+    const dy = lms[tip].y - wrist.y;
+    totalDist += Math.sqrt(dx * dx + dy * dy);
+  }
+
+  const avgDist = totalDist / tips.length;
+  return Math.min(1, avgDist / (handScale * 2.2));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: HAMMER-ON / PULL-OFF EXPRESSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Detects chord changes that happen while in two-hand mode without a strum
+ * gesture, interpreting them as hammer-on or pull-off techniques.
+ */
+function processChordExpression(fingerCount, nowMs) {
+  if (!twoHandMode) {
+    prevChordFingerCount = fingerCount;
+    return;
+  }
+
+  // Only trigger when chord changes without a recent strum
+  const timeSinceStrum = nowMs - lastStrumTime;
+
+  if (fingerCount !== prevChordFingerCount && timeSinceStrum > 300 && nowMs > hammerOnCooldown) {
+    const newChord = fingerCount;
+    const oldChord = currentChord;
+
+    if (newChord > 0 && newChord !== oldChord) {
+      // Determine if hammer-on (adding fingers) or pull-off (removing fingers)
+      const isHammer = fingerCount > prevChordFingerCount;
+
+      // Update the chord
+      currentChord = newChord;
+      lastChord = currentChord;
+      candidateChord = currentChord;
+      candidateCount = 0;
+      updateChordUI(currentChord);
+
+      // Play with expression
+      playChord(currentChord, {
+        velocity: 0.6,
+        direction: lastStrumDirection,
+        hammerOn: isHammer,
+        pullOff: !isHammer
+      });
+
+      triggerExpression(isHammer ? "🔨 Hammer-On" : "🎵 Pull-Off");
+      hammerOnCooldown = nowMs + 250; // prevent rapid re-triggers
+    } else if (newChord === 0 && oldChord > 0) {
+      // Pull-off to mute
+      setChord(0);
+      triggerExpression("🎵 Pull-Off → Mute");
+      hammerOnCooldown = nowMs + 250;
+    }
+  }
+
+  prevChordFingerCount = fingerCount;
+}
+
+/**
+ * In two-hand mode, chord changes are only applied from the chord hand.
+ * The strum hand triggers playback separately.
+ */
+function processChordHandCount(count) {
+  if (count === currentChord) {
+    candidateChord = count;
+    candidateCount = 0;
+    return;
+  }
+
+  if (count === candidateChord) {
+    candidateCount++;
+    if (candidateCount >= STABILITY_THRESHOLD) {
+      // In two-hand mode, update chord silently (strum triggers playback)
+      currentChord = candidateChord;
+      lastChord = currentChord;
+      candidateCount = 0;
+      updateChordUI(currentChord);
+    }
+  } else {
+    candidateChord = count;
+    candidateCount = 1;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: EXPRESSION DISPLAY
+// ═══════════════════════════════════════════════════════════════════════════
+function triggerExpression(label) {
+  expressionLabel = label;
+  expressionFade = 1.0;
+
+  const el = document.getElementById("expression-label");
+  if (el) {
+    el.textContent = label;
+    el.classList.remove("fade-out");
+    el.classList.add("active");
+    // Trigger reflow for animation reset
+    void el.offsetWidth;
+    setTimeout(() => {
+      el.classList.add("fade-out");
+      setTimeout(() => el.classList.remove("active", "fade-out"), 600);
+    }, 800);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FINGER ANALYSIS (shared between chord hand analysis)
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Smart 3D Finger Classifier — 3D Orientation-Invariant & Scale-Normalized
@@ -503,24 +1475,38 @@ function analyzeHandLandmarks(lms) {
   return { states: extended, count };
 }
 
-function majority(arr) {
-  if (!arr.length) return 0;
-  const cnt = {};
-  let best = arr[0], bestC = 0;
-  for (const v of arr) {
-    cnt[v] = (cnt[v] || 0) + 1;
-    if (cnt[v] > bestC) { bestC = cnt[v]; best = v; }
+function handleDetectedCount(count) {
+  if (count === currentChord) {
+    candidateChord = count;
+    candidateCount = 0;
+    return;
   }
-  return best;
+
+  if (count === candidateChord) {
+    candidateCount++;
+    if (candidateCount >= STABILITY_THRESHOLD) {
+      setChord(candidateChord);
+      candidateCount = 0;
+    }
+  } else {
+    candidateChord = count;
+    candidateCount = 1;
+  }
 }
 
-function setChord(id) {
+function setChord(id, immediate = false) {
+  if (id === currentChord && !immediate) return;
   currentChord = id;
-  if (currentChord !== lastChord) {
-    lastChord = currentChord;
+  lastChord = currentChord;
+  candidateChord = currentChord;
+  candidateCount = 0;
+
+  // In two-hand mode without immediate flag, don't auto-play
+  // (strum hand or hammer-on/pull-off triggers playback)
+  if (!twoHandMode || immediate) {
     playChord(currentChord);
-    updateChordUI(currentChord);
   }
+  updateChordUI(currentChord);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -569,9 +1555,127 @@ function drawSkeleton(lms) {
   outputCtx.shadowBlur = 0;
 }
 
+/**
+ * Stage 3: Draw two hand skeletons with distinct visual styles.
+ * Chord hand = warm color (chord color), Strum hand = cyan/electric blue
+ */
+function drawDualHandSkeleton(chordLms, strumLms) {
+  const W = outputCanvas.width;
+  const H = outputCanvas.height;
+  const chordColor = CHORD_CONFIG[currentChord].color;
+  const strumColor = "#22d3ee"; // cyan for strum hand
+
+  const px = (lm) => [(1 - lm.x) * W, lm.y * H];
+
+  // Draw chord hand
+  if (chordLms) {
+    outputCtx.lineWidth   = 3.5;
+    outputCtx.strokeStyle = chordColor;
+    outputCtx.shadowColor = chordColor;
+    outputCtx.shadowBlur  = 10;
+
+    for (const [i, j] of HAND_CONNECTIONS) {
+      const [x1, y1] = px(chordLms[i]);
+      const [x2, y2] = px(chordLms[j]);
+      outputCtx.beginPath();
+      outputCtx.moveTo(x1, y1);
+      outputCtx.lineTo(x2, y2);
+      outputCtx.stroke();
+    }
+
+    for (let k = 0; k < chordLms.length; k++) {
+      const [x, y] = px(chordLms[k]);
+      const isTip = [4,8,12,16,20].includes(k);
+      outputCtx.beginPath();
+      outputCtx.arc(x, y, isTip ? 7 : 3.5, 0, 2 * Math.PI);
+      outputCtx.fillStyle = isTip ? "#ffffff" : chordColor;
+      outputCtx.shadowBlur = isTip ? 18 : 6;
+      outputCtx.fill();
+    }
+
+    // Draw "CHORD" label near wrist
+    const [wx, wy] = px(chordLms[0]);
+    outputCtx.shadowBlur = 0;
+    outputCtx.font = "bold 11px 'Outfit', sans-serif";
+    outputCtx.fillStyle = chordColor;
+    outputCtx.textAlign = "center";
+    outputCtx.fillText("CHORD", wx, wy + 22);
+  }
+
+  // Draw strum hand
+  if (strumLms) {
+    outputCtx.lineWidth   = 2.5;
+    outputCtx.strokeStyle = strumColor;
+    outputCtx.shadowColor = strumColor;
+    outputCtx.shadowBlur  = 8;
+
+    // Draw strum trail (motion path)
+    if (strumHistory.length >= 3) {
+      outputCtx.lineWidth = 2;
+      outputCtx.strokeStyle = `${strumColor}80`;
+      outputCtx.shadowBlur = 4;
+      outputCtx.beginPath();
+      for (let i = 0; i < strumHistory.length; i++) {
+        const sx = (1 - strumHistory[i].x) * W;
+        const sy = strumHistory[i].y * H;
+        if (i === 0) outputCtx.moveTo(sx, sy);
+        else outputCtx.lineTo(sx, sy);
+      }
+      outputCtx.stroke();
+    }
+
+    // Draw connections with dashed style for strum hand
+    outputCtx.lineWidth = 2.5;
+    outputCtx.strokeStyle = strumColor;
+    outputCtx.shadowBlur = 8;
+    outputCtx.setLineDash([6, 3]);
+
+    for (const [i, j] of HAND_CONNECTIONS) {
+      const [x1, y1] = px(strumLms[i]);
+      const [x2, y2] = px(strumLms[j]);
+      outputCtx.beginPath();
+      outputCtx.moveTo(x1, y1);
+      outputCtx.lineTo(x2, y2);
+      outputCtx.stroke();
+    }
+
+    outputCtx.setLineDash([]);
+
+    for (let k = 0; k < strumLms.length; k++) {
+      const [x, y] = px(strumLms[k]);
+      const isTip = [4,8,12,16,20].includes(k);
+      outputCtx.beginPath();
+      outputCtx.arc(x, y, isTip ? 6 : 3, 0, 2 * Math.PI);
+      outputCtx.fillStyle = isTip ? "#ffffff" : strumColor;
+      outputCtx.shadowBlur = isTip ? 14 : 5;
+      outputCtx.fill();
+    }
+
+    // Draw "STRUM" label near wrist
+    const [wx, wy] = px(strumLms[0]);
+    outputCtx.shadowBlur = 0;
+    outputCtx.font = "bold 11px 'Outfit', sans-serif";
+    outputCtx.fillStyle = strumColor;
+    outputCtx.textAlign = "center";
+    outputCtx.fillText("STRUM", wx, wy + 22);
+  }
+
+  outputCtx.shadowBlur = 0;
+}
+
 // ── Guitar String Animation ───────────────────────────────────────────────
-function kickStrings() {
-  vibAmps = vibAmps.map(() => 1.0);
+function kickStringIndex(idx) {
+  if (idx >= 0 && idx < vibAmps.length) {
+    vibAmps[idx] = 1.0;
+  }
+}
+
+function kickStrings(stringIndices) {
+  if (Array.isArray(stringIndices)) {
+    stringIndices.forEach(idx => kickStringIndex(idx));
+  } else {
+    vibAmps = vibAmps.map(() => 1.0);
+  }
 }
 
 function animateStrings(ts) {
@@ -662,6 +1766,48 @@ function updateFingerPills(states) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: HAND MODE & STRUM UI UPDATES
+// ═══════════════════════════════════════════════════════════════════════════
+function updateHandModeUI() {
+  const modeEl = document.getElementById("hand-mode-badge");
+  const strumStatusEl = document.getElementById("strum-status");
+
+  if (modeEl) {
+    if (twoHandMode) {
+      modeEl.textContent = "✌ Two-Hand Mode";
+      modeEl.classList.add("active");
+    } else {
+      modeEl.textContent = "☝ Single Hand";
+      modeEl.classList.remove("active");
+    }
+  }
+}
+
+function updateStrumHandUI(state) {
+  const el = document.getElementById("strum-status");
+  if (!el) return;
+
+  switch (state) {
+    case "palm-mute":
+      el.textContent = "🤚 Palm Mute";
+      el.className = "strum-status palm-mute";
+      break;
+    case "strum-down":
+      el.textContent = "⬇ Down Strum";
+      el.className = "strum-status strum-active";
+      break;
+    case "strum-up":
+      el.textContent = "⬆ Up Strum";
+      el.className = "strum-status strum-active";
+      break;
+    default:
+      el.textContent = "🎸 Ready";
+      el.className = "strum-status";
+      break;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // VOICE COMMANDS
 // ═══════════════════════════════════════════════════════════════════════════
 function setupVoice() {
@@ -678,12 +1824,12 @@ function setupVoice() {
 
   speechRec.onresult = (e) => {
     const t = e.results[e.results.length - 1][0].transcript.trim().toLowerCase();
-    if      (t.includes("e minor") || t.includes("em")     || t === "one") setChord(1);
-    else if (t.includes("a minor") || t.includes("am")     || t === "two") setChord(2);
-    else if (t.includes("c major") || t === "c" || t === "see"|| t === "three") setChord(3);
-    else if (t.includes("d major") || t === "d" || t === "dee"|| t === "four")  setChord(4);
-    else if (t.includes("g major") || t === "g" || t === "gee"|| t === "five")  setChord(5);
-    else if (t.includes("stop")   || t.includes("mute") || t.includes("silence")) setChord(0);
+    if      (t.includes("e minor") || t.includes("em")     || t === "one") setChord(1, true);
+    else if (t.includes("a minor") || t.includes("am")     || t === "two") setChord(2, true);
+    else if (t.includes("c major") || t === "c" || t === "see"|| t === "three") setChord(3, true);
+    else if (t.includes("d major") || t === "d" || t === "dee"|| t === "four")  setChord(4, true);
+    else if (t.includes("g major") || t === "g" || t === "gee"|| t === "five")  setChord(5, true);
+    else if (t.includes("stop")   || t.includes("mute") || t.includes("silence")) setChord(0, true);
   };
 
   speechRec.onerror = () => {};
@@ -762,21 +1908,88 @@ function bindUI() {
     const trigger = (e) => {
       e.preventDefault();
       ensureAudioCtx();
-      setChord(parseInt(btn.dataset.chord));
+      setChord(parseInt(btn.dataset.chord), true);
     };
     btn.addEventListener("click",      trigger);
     btn.addEventListener("touchstart", trigger, { passive: false });
   });
 
+  // Sound Studio Preset Pills
+  document.querySelectorAll(".preset-pill").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      ensureAudioCtx();
+      applySoundPreset(btn.dataset.preset);
+      showToast(`Switched to ${GUITAR_PRESETS[btn.dataset.preset].name}`, "info");
+    });
+  });
+
+  // Sound Studio Sliders
+  const slVol = document.getElementById("slider-volume");
+  if (slVol) {
+    slVol.addEventListener("input", (e) => {
+      ensureAudioCtx();
+      updateMasterVolume(parseFloat(e.target.value));
+    });
+  }
+
+  const slSus = document.getElementById("slider-sustain");
+  if (slSus) {
+    slSus.addEventListener("input", (e) => {
+      ensureAudioCtx();
+      updateSustain(parseFloat(e.target.value));
+    });
+  }
+
+  const slRev = document.getElementById("slider-reverb");
+  if (slRev) {
+    slRev.addEventListener("input", (e) => {
+      ensureAudioCtx();
+      updateReverbWet(parseFloat(e.target.value));
+    });
+  }
+
+  const slTone = document.getElementById("slider-tone");
+  if (slTone) {
+    slTone.addEventListener("input", (e) => {
+      ensureAudioCtx();
+      updateToneBrightness(parseFloat(e.target.value));
+    });
+  }
+
+  // Ambient Quick Button
+  const ambBtn = document.getElementById("btn-ambient-quick");
+  if (ambBtn) {
+    ambBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      ensureAudioCtx();
+      toggleAmbientSustain();
+      showToast(SOUND_SETTINGS.ambientSustain ? "✨ Ambient Sustain Enabled" : "Ambient Sustain Disabled", "info");
+    });
+  }
+
+  // Collapse / Expand Sound Studio Header
+  const collapseBtn = document.getElementById("btn-collapse-studio");
+  const headerToggle = document.getElementById("studio-header-toggle");
+  const studioPanel = document.getElementById("sound-studio-panel");
+  if (headerToggle && studioPanel) {
+    headerToggle.addEventListener("click", (e) => {
+      if (e.target.closest("#btn-ambient-quick")) return;
+      studioPanel.classList.toggle("collapsed");
+      const isExpanded = !studioPanel.classList.contains("collapsed");
+      if (collapseBtn) collapseBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+    });
+  }
+
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     const k = e.key.toLowerCase();
-    if      (k === "1" || k === "e") setChord(1);
-    else if (k === "2" || k === "a") setChord(2);
-    else if (k === "3" || k === "c") setChord(3);
-    else if (k === "4" || k === "d") setChord(4);
-    else if (k === "5" || k === "g") setChord(5);
-    else if (k === "0" || k === "q" || k === "m") setChord(0);
+    if      (k === "1" || k === "e") setChord(1, true);
+    else if (k === "2" || k === "a") setChord(2, true);
+    else if (k === "3" || k === "c") setChord(3, true);
+    else if (k === "4" || k === "d") setChord(4, true);
+    else if (k === "5" || k === "g") setChord(5, true);
+    else if (k === "0" || k === "q" || k === "m") setChord(0, true);
     else if (k === "v") toggleVoice();
   });
 }
