@@ -8,6 +8,13 @@
  * Gesture Engine: MediaPipe HandLandmarker (VIDEO mode) + Smart 3D Orientation-Invariant
  *   and Scale-Normalized Finger Scoring algorithm identical to Python main.py.
  * Voice Engine: Web Speech API (webkitSpeechRecognition fallback).
+ *
+ * Stage 1: Realistic acoustic guitar-string playback with natural decay, sustain,
+ *          strumming, and smooth chord changes.
+ * Stage 2: Audio effects, tone controls, reverb, sustain customization, guitar presets.
+ * Stage 3: Two-Hand Playing, Fingerstyle Mode, Strum Velocity, Palm Mute,
+ *          Strum Direction, Hammer-on / Pull-off, Performance Recording,
+ *          Playing Mode Selector, and Musical Expression.
  */
 
 import { HandLandmarker, FilesetResolver }
@@ -142,6 +149,133 @@ let vibAmps           = [0,0,0,0,0,0];
 let cameraStarting    = false;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: PLAYING MODES & TWO-HAND STATE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Playing Modes:
+ * - "classic"    : Original single-hand mode (default). Finger count selects + auto-plays.
+ * - "two-hand"   : Chord hand selects chord, Strum hand triggers playback.
+ * - "fingerstyle" : Chord hand selects chord, fingerpicking patterns auto-play.
+ */
+let playingMode       = "classic";     // current mode
+let twoHandMode       = false;         // true when 2 hands are detected AND mode allows it
+
+// Strum hand tracking
+const strumHistory    = [];            // [{y, x, t}] — wrist position history
+const STRUM_HISTORY_MAX = 12;
+let lastStrumTime     = 0;
+const STRUM_COOLDOWN_MS = 120;         // ms between strum triggers
+let lastStrumDirection = "down";
+let strumVelocity     = 0;             // 0..1 normalized strum speed
+
+// Palm mute detection
+let isPalmMuting      = false;
+let palmMuteStartTime = 0;
+
+// Hammer-on / Pull-off (chord hand finger changes without strum)
+let prevChordFingerCount = 0;
+let hammerOnCooldown     = 0;
+
+// Expression display state
+let expressionLabel   = "";
+let expressionFade    = 0;
+
+// Hand role assignment
+let chordHandLandmarks = null;
+let strumHandLandmarks = null;
+let chordHandedness    = "";           // "Left" or "Right"
+let strumHandedness    = "";
+
+// Configurable hand roles: which MediaPipe label is chord vs strum
+// In mirrored view: "Right" label = user's left hand
+let preferredChordLabel = "Right";    // MP label for chord hand (user's left in mirror)
+let preferredStrumLabel = "Left";     // MP label for strum hand (user's right in mirror)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: FINGERSTYLE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Fingerstyle patterns: each pattern is an array of step objects.
+ * Each step: { strings: [indices], delay: beats }
+ * "strings" are 0-based indices into the chord's freqs array.
+ * "delay" is in beats relative to the last step.
+ */
+const FINGERSTYLE_PATTERNS = {
+  // Pattern 1: Classic Travis picking (bass-treble alternating)
+  travis: {
+    name: "Travis Pick",
+    steps: [
+      { strings: [0],    delay: 0 },     // bass
+      { strings: [3, 4], delay: 1 },     // treble pair
+      { strings: [1],    delay: 1 },     // alt bass
+      { strings: [3, 4], delay: 1 },     // treble pair
+      { strings: [0],    delay: 1 },     // bass
+      { strings: [2, 4], delay: 1 },     // treble variation
+      { strings: [1],    delay: 1 },     // alt bass
+      { strings: [3],    delay: 1 },     // treble single
+    ]
+  },
+  // Pattern 2: Rolling arpeggio (up)
+  arpeggio: {
+    name: "Arpeggio",
+    steps: [
+      { strings: [0],    delay: 0 },
+      { strings: [1],    delay: 1 },
+      { strings: [2],    delay: 1 },
+      { strings: [3],    delay: 1 },
+      { strings: [4],    delay: 1 },
+      { strings: [3],    delay: 1 },
+      { strings: [2],    delay: 1 },
+      { strings: [1],    delay: 1 },
+    ]
+  },
+  // Pattern 3: Gentle classical (bass-melody separation)
+  classical: {
+    name: "Classical",
+    steps: [
+      { strings: [0],       delay: 0 },     // bass
+      { strings: [2],       delay: 0.5 },   // mid
+      { strings: [4],       delay: 0.5 },   // treble
+      { strings: [3],       delay: 0.5 },   // upper mid
+      { strings: [2],       delay: 0.5 },   // mid
+      { strings: [4],       delay: 0.5 },   // treble
+      { strings: [1],       delay: 1 },     // alt bass
+      { strings: [3, 4],   delay: 0.5 },   // treble pair
+    ]
+  },
+  // Pattern 4: Waltz pattern (3/4 feel)
+  waltz: {
+    name: "Waltz",
+    steps: [
+      { strings: [0],       delay: 0 },     // bass strong
+      { strings: [2, 3, 4], delay: 1.5 },   // chord hit
+      { strings: [2, 3, 4], delay: 1.5 },   // chord hit
+    ]
+  }
+};
+
+let fingerstyleState = {
+  active: false,
+  patternKey: "travis",
+  stepIndex: 0,
+  tempo: 120,          // BPM
+  timerId: null,
+  lastChordPlayed: -1,
+  velocity: 0.7
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: PERFORMANCE RECORDING
+// ═══════════════════════════════════════════════════════════════════════════
+let mediaRecorder       = null;
+let recordedChunks      = [];
+let isRecording         = false;
+let recordingStartTime  = 0;
+let recordingDest       = null;   // MediaStreamDestination node
+
+// ═══════════════════════════════════════════════════════════════════════════
 // BOOT
 // ═══════════════════════════════════════════════════════════════════════════
 document.addEventListener("DOMContentLoaded", () => {
@@ -157,6 +291,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   bindUI();
   syncStudioUI();
+  syncPlayingModeUI();
   loadMediaPipeModel();
 });
 
@@ -565,13 +700,38 @@ function buildGuitarChordBuffers() {
   console.log(`[Guitar Engine] Synthesized multi-preset physical string soundbanks in memory.`);
 }
 
-function playChord(chordId) {
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: VELOCITY-SENSITIVE CHORD PLAYBACK
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Play a chord with velocity and strum direction awareness.
+ * @param {number} chordId - The chord to play (0-5)
+ * @param {object} [expression] - Optional expression parameters
+ * @param {number} [expression.velocity] - 0..1 strum velocity (default 0.85)
+ * @param {string} [expression.direction] - "down" or "up" strum direction
+ * @param {boolean} [expression.hammerOn] - true if this is a hammer-on (softer, no strum attack)
+ * @param {boolean} [expression.pullOff] - true if this is a pull-off (softer, descending)
+ * @param {boolean} [expression.fingerpick] - true if this is a fingerstyle pluck
+ * @param {number[]} [expression.stringSubset] - play only these string indices (for fingerstyle)
+ */
+function playChord(chordId, expression = {}) {
   ensureAudioCtx();
 
-  pendingStrumTimers.forEach(id => clearTimeout(id));
-  pendingStrumTimers = [];
+  // Only clear pending strum timers for full chord strums, not for fingerstyle single notes
+  if (!expression.fingerpick) {
+    pendingStrumTimers.forEach(id => clearTimeout(id));
+    pendingStrumTimers = [];
+  }
 
   const now = audioCtx.currentTime;
+
+  const vel = expression.velocity !== undefined ? expression.velocity : 0.85;
+  const direction = expression.direction || "down";
+  const isHammerOn = expression.hammerOn || false;
+  const isPullOff = expression.pullOff || false;
+  const isFingerpick = expression.fingerpick || false;
+  const stringSubset = expression.stringSubset || null;
 
   // 1. If MUTE (chord 0 / Fist)
   if (chordId === 0 || !CHORD_CONFIG[chordId]) {
@@ -579,9 +739,11 @@ function playChord(chordId) {
     return;
   }
 
-  // 2. If changing to a new chord:
-  const releaseSec = SOUND_SETTINGS.ambientSustain ? 0.15 : 0.075;
-  activeVoices.forEach(voice => voice.fadeAndDispose(releaseSec));
+  // 2. Fade previous voices (gentler for fingerpick to allow overlap)
+  if (!isFingerpick) {
+    const releaseSec = SOUND_SETTINGS.ambientSustain ? 0.15 : 0.075;
+    activeVoices.forEach(voice => voice.fadeAndDispose(releaseSec));
+  }
 
   const cfg = CHORD_CONFIG[chordId];
   if (!cfg.freqs || cfg.freqs.length === 0) return;
@@ -598,7 +760,51 @@ function playChord(chordId) {
     ? Math.max(SOUND_SETTINGS.sustainScale, 1.8)
     : SOUND_SETTINGS.sustainScale;
 
-  for (let sIdx = 0; sIdx < nStrings; sIdx++) {
+  // Determine which strings to play
+  let stringOrder;
+  if (stringSubset) {
+    // Fingerstyle: play specific strings only
+    stringOrder = stringSubset.filter(i => i >= 0 && i < nStrings);
+  } else {
+    // Full strum: all strings in direction order
+    stringOrder = [];
+    for (let i = 0; i < nStrings; i++) stringOrder.push(i);
+    if (direction === "up") stringOrder.reverse();
+  }
+
+  // Velocity-influenced gain scaling
+  const velocityGainScale = 0.55 + vel * 0.45; // maps 0..1 -> 0.55..1.0
+
+  // Hammer-on / pull-off are softer with faster attack
+  const expressionGainMul = isHammerOn ? 0.60 : (isPullOff ? 0.50 : 1.0);
+
+  // Fingerpick: slightly softer, no inter-string delay
+  const fingerpickGainMul = isFingerpick ? 0.75 : 1.0;
+
+  // Strum speed — faster strum = shorter inter-string delay
+  const baseStrumStepMs = isFingerpick
+    ? 3    // near-instant for fingerstyle (individual notes)
+    : isHammerOn || isPullOff
+      ? 8   // near-instant for legato techniques
+      : Math.max(10, Math.min(35, 28 - vel * 18)); // 10..28ms
+
+  // Stage 3: Velocity-influenced brightness via high-shelf EQ nudge
+  if (effectsChain && audioCtx) {
+    const p = GUITAR_PRESETS[SOUND_SETTINGS.preset] || GUITAR_PRESETS.nylon;
+    const velBrightnessBoost = (vel - 0.5) * 3.0; // -1.5 to +1.5 dB
+    const targetBrightness = p.toneBrightness + SOUND_SETTINGS.toneOffset + velBrightnessBoost;
+    effectsChain.eqToneBrightness.gain.setTargetAtTime(targetBrightness, now, 0.02);
+    // Restore after strum settles
+    setTimeout(() => {
+      if (effectsChain && audioCtx) {
+        const restore = p.toneBrightness + SOUND_SETTINGS.toneOffset;
+        effectsChain.eqToneBrightness.gain.setTargetAtTime(restore, audioCtx.currentTime, 0.08);
+      }
+    }, 200);
+  }
+
+  for (let orderIdx = 0; orderIdx < stringOrder.length; orderIdx++) {
+    const sIdx = stringOrder[orderIdx];
     const freq = cfg.freqs[sIdx];
     const freqKey = freq.toFixed(2);
     const variations = bank[freqKey] || (stringBufferBanks.nylon && stringBufferBanks.nylon[freqKey]);
@@ -618,17 +824,26 @@ function playChord(chordId) {
     const microDetuneCents = (Math.random() * 2 - 1) * 1.2;
     src.playbackRate.value = Math.pow(2, microDetuneCents / 1200);
 
+    // Velocity-aware per-string gain with position curve
     const posInChord = sIdx / Math.max(1, nStrings - 1);
     const baseVel = 0.90 - Math.sin(posInChord * Math.PI) * 0.12;
     const velJitter = (Math.random() * 0.08 - 0.04);
-    const stringGain = Math.max(0.65, Math.min(1.0, baseVel + velJitter)) * 0.42;
+    const stringGain = Math.max(0.35, Math.min(1.0, baseVel + velJitter))
+      * 0.42 * velocityGainScale * expressionGainMul * fingerpickGainMul;
 
     const voiceGain = audioCtx.createGain();
     voiceGain.gain.setValueAtTime(stringGain, stringStartTime);
 
-    // Dynamic sustain decay envelope
+    // Dynamic sustain decay envelope — hammer-on has gentler attack
     const baseDur = buffer.duration;
     const noteLifetime = baseDur * effectiveSustain;
+
+    if (isHammerOn) {
+      // Smooth fade-in for hammer-on (legato feel)
+      voiceGain.gain.setValueAtTime(0.0001, stringStartTime);
+      voiceGain.gain.exponentialRampToValueAtTime(stringGain, stringStartTime + 0.025);
+    }
+
     voiceGain.gain.setTargetAtTime(0.0001, stringStartTime + 0.08, noteLifetime * 0.32);
 
     // Subtle Stereo Panning per string (-0.14 on bass to +0.14 on high treble)
@@ -691,7 +906,7 @@ function playChord(chordId) {
     }, delayMs);
     pendingStrumTimers.push(timerId);
 
-    const stepMs = 23 + Math.floor(Math.random() * 6);
+    const stepMs = baseStrumStepMs + Math.floor(Math.random() * 4);
     curDelaySec += stepMs / 1000;
   }
 }
@@ -836,7 +1051,7 @@ function syncStudioUI() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// MEDIAPIPE MODEL LOADING
+// MEDIAPIPE MODEL LOADING (Stage 3: numHands = 2)
 // ═══════════════════════════════════════════════════════════════════════════
 async function loadMediaPipeModel() {
   const overlay  = document.getElementById("loading-overlay");
@@ -853,7 +1068,7 @@ async function loadMediaPipeModel() {
         delegate
       },
       runningMode: "VIDEO",
-      numHands: 1
+      numHands: 2  // Stage 3: Track both hands
     });
   };
 
@@ -952,6 +1167,15 @@ function stopCamera() {
   outputCtx.clearRect(0, 0, outputCanvas.width, outputCanvas.height);
   updateFingerPills([false, false, false, false, false]);
   setChord(0);
+
+  // Reset two-hand state
+  twoHandMode = false;
+  chordHandLandmarks = null;
+  strumHandLandmarks = null;
+  updateHandModeUI();
+
+  // Stop fingerstyle if running
+  stopFingerstyle();
 }
 
 async function flipCamera() {
@@ -963,7 +1187,62 @@ async function flipCamera() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// FRAME PROCESSING & GESTURE DETECTION
+// STAGE 3: PLAYING MODE MANAGEMENT
+// ═══════════════════════════════════════════════════════════════════════════
+
+function setPlayingMode(mode) {
+  if (mode === playingMode) return;
+
+  // Stop fingerstyle if switching away
+  if (playingMode === "fingerstyle") {
+    stopFingerstyle();
+  }
+
+  playingMode = mode;
+  syncPlayingModeUI();
+
+  // If switching to fingerstyle and we already have a chord, start the pattern
+  if (mode === "fingerstyle" && currentChord > 0) {
+    startFingerstyle(currentChord);
+  }
+
+  showToast(`Playing Mode: ${getModeName(mode)}`, "info");
+}
+
+function getModeName(mode) {
+  switch (mode) {
+    case "classic":     return "Classic (Single Hand)";
+    case "two-hand":    return "Two-Hand Strumming";
+    case "fingerstyle": return "Fingerstyle";
+    default:            return mode;
+  }
+}
+
+function syncPlayingModeUI() {
+  document.querySelectorAll(".mode-pill").forEach(btn => {
+    const isAct = btn.dataset.mode === playingMode;
+    btn.classList.toggle("active", isAct);
+  });
+
+  // Show/hide hand config
+  const handConfigEl = document.getElementById("hand-config-row");
+  if (handConfigEl) {
+    handConfigEl.style.display = (playingMode === "two-hand") ? "flex" : "none";
+  }
+
+  // Show/hide fingerstyle config
+  const fsConfigEl = document.getElementById("fingerstyle-config-row");
+  if (fsConfigEl) {
+    fsConfigEl.style.display = (playingMode === "fingerstyle") ? "flex" : "none";
+  }
+
+  // Update recording button visibility
+  const recSection = document.getElementById("recording-section");
+  if (recSection) recSection.style.display = "";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: FRAME PROCESSING & GESTURE DETECTION
 // ═══════════════════════════════════════════════════════════════════════════
 function processFrame() {
   if (!isCameraRunning) return;
@@ -976,22 +1255,612 @@ function processFrame() {
       const result = handLandmarker.detectForVideo(videoEl, now);
 
       if (result.landmarks && result.landmarks.length > 0) {
-        const lms = result.landmarks[0];
-        drawSkeleton(lms);
+        const handsDetected = result.landmarks.length;
+        const handedness = result.handedness || [];
 
-        const { states, count } = analyzeHandLandmarks(lms);
-        updateFingerPills(states);
+        if (handsDetected >= 2 && playingMode === "two-hand") {
+          // ── TWO-HAND MODE ──
+          twoHandMode = true;
 
-        handleDetectedCount(count);
+          // Assign hands based on configurable preference
+          const hand0Label = handedness[0]?.[0]?.categoryName || "Left";
+          const hand1Label = handedness[1]?.[0]?.categoryName || "Right";
+
+          let chordIdx, strumIdx;
+
+          if (hand0Label === preferredChordLabel) {
+            chordIdx = 0;
+            strumIdx = 1;
+          } else if (hand1Label === preferredChordLabel) {
+            chordIdx = 1;
+            strumIdx = 0;
+          } else {
+            // Fallback: use X position (leftmost in mirrored = chord)
+            const x0 = result.landmarks[0][0].x;
+            const x1 = result.landmarks[1][0].x;
+            chordIdx = x0 > x1 ? 0 : 1;
+            strumIdx = chordIdx === 0 ? 1 : 0;
+          }
+
+          chordHandLandmarks = result.landmarks[chordIdx];
+          strumHandLandmarks = result.landmarks[strumIdx];
+          chordHandedness = handedness[chordIdx]?.[0]?.categoryName || "?";
+          strumHandedness = handedness[strumIdx]?.[0]?.categoryName || "?";
+
+          // Draw both hand skeletons with different styling
+          drawDualHandSkeleton(chordHandLandmarks, strumHandLandmarks);
+
+          // Process chord hand (finger counting)
+          const { states, count } = analyzeHandLandmarks(chordHandLandmarks);
+          updateFingerPills(states);
+
+          // Update chord selection silently (strum triggers playback)
+          processChordHandCount(count);
+
+          // Process strum hand (motion + palm mute detection)
+          processStrumHand(strumHandLandmarks, now, count);
+
+          // Process chord changes for hammer-on / pull-off
+          processChordExpression(count, now);
+
+        } else if (handsDetected >= 2 && playingMode === "fingerstyle") {
+          // ── FINGERSTYLE WITH TWO HANDS ──
+          twoHandMode = true;
+
+          // Use the chord hand for selecting chords
+          const hand0Label = handedness[0]?.[0]?.categoryName || "Left";
+          const hand1Label = handedness[1]?.[0]?.categoryName || "Right";
+
+          let chordIdx = 0;
+          if (hand0Label === preferredChordLabel) chordIdx = 0;
+          else if (hand1Label === preferredChordLabel) chordIdx = 1;
+
+          chordHandLandmarks = result.landmarks[chordIdx];
+          strumHandLandmarks = result.landmarks[chordIdx === 0 ? 1 : 0];
+
+          drawDualHandSkeleton(chordHandLandmarks, strumHandLandmarks);
+
+          const { states, count } = analyzeHandLandmarks(chordHandLandmarks);
+          updateFingerPills(states);
+          handleFingerstyleChordChange(count);
+
+        } else {
+          // ── SINGLE HAND / CLASSIC MODE ──
+          twoHandMode = false;
+          chordHandLandmarks = result.landmarks[0];
+          strumHandLandmarks = null;
+
+          const lms = result.landmarks[0];
+          drawSkeleton(lms);
+
+          const { states, count } = analyzeHandLandmarks(lms);
+          updateFingerPills(states);
+
+          if (playingMode === "classic") {
+            handleDetectedCount(count);
+          } else if (playingMode === "fingerstyle") {
+            handleFingerstyleChordChange(count);
+          } else if (playingMode === "two-hand") {
+            // Two-hand mode selected but only one hand visible: still update chord
+            processChordHandCount(count);
+          }
+        }
+
+        updateHandModeUI();
+
       } else {
+        twoHandMode = false;
+        chordHandLandmarks = null;
+        strumHandLandmarks = null;
         updateFingerPills([false, false, false, false, false]);
-        handleDetectedCount(0);
+
+        if (playingMode === "classic") {
+          handleDetectedCount(0);
+        }
+
+        updateHandModeUI();
       }
     }
   }
 
   rafId = requestAnimationFrame(processFrame);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: STRUM HAND PROCESSING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Analyze the strum hand's wrist motion to detect strumming gestures.
+ * Uses wrist Y-position history to detect velocity and direction of strums.
+ */
+function processStrumHand(strumLms, nowMs, chordFingerCount) {
+  if (!strumLms || strumLms.length < 21) return;
+
+  const wristY = strumLms[0].y;   // normalized 0..1 (top to bottom)
+  const wristX = strumLms[0].x;
+
+  // Track wrist Y history
+  strumHistory.push({ y: wristY, x: wristX, t: nowMs });
+  while (strumHistory.length > STRUM_HISTORY_MAX) {
+    strumHistory.shift();
+  }
+
+  // ── Palm Mute Detection ──
+  // Open palm facing camera with all fingers spread = palm mute
+  const { states: strumFingerStates } = analyzeHandLandmarks(strumLms);
+  const allFingersOpen = strumFingerStates.filter(Boolean).length >= 4;
+  const palmOpenness = calculatePalmOpenness(strumLms);
+
+  if (allFingersOpen && palmOpenness > 0.65) {
+    if (!isPalmMuting) {
+      isPalmMuting = true;
+      palmMuteStartTime = nowMs;
+      // Immediately damp all active voices
+      activeVoices.forEach(voice => voice.fadeAndDispose(0.035));
+      triggerExpression("🤚 Palm Mute");
+    }
+    updateStrumHandUI("palm-mute");
+    return;
+  } else {
+    isPalmMuting = false;
+  }
+
+  // ── Strum Velocity Detection ──
+  if (strumHistory.length < 4) {
+    updateStrumHandUI("ready");
+    return;
+  }
+
+  // Calculate vertical velocity over last few frames
+  const recent = strumHistory.slice(-5);
+  const oldest = recent[0];
+  const newest = recent[recent.length - 1];
+  const dt = (newest.t - oldest.t) / 1000; // seconds
+
+  if (dt < 0.01) {
+    updateStrumHandUI("ready");
+    return;
+  }
+
+  const dy = newest.y - oldest.y;  // positive = moving down
+  const speed = Math.abs(dy) / dt; // units per second (normalized coords)
+
+  // Strum threshold: requires minimum speed
+  const STRUM_SPEED_THRESHOLD = 0.8; // normalized units/sec — requires meaningful hand movement
+
+  if (speed > STRUM_SPEED_THRESHOLD && (nowMs - lastStrumTime) > STRUM_COOLDOWN_MS) {
+    // Determine direction
+    const direction = dy > 0 ? "down" : "up";
+    lastStrumDirection = direction;
+
+    // Normalize velocity (0..1) — clamp between threshold and max expected speed
+    strumVelocity = Math.min(1.0, Math.max(0, (speed - STRUM_SPEED_THRESHOLD) / 3.5));
+
+    lastStrumTime = nowMs;
+
+    // Play the current chord with velocity and direction
+    if (currentChord > 0) {
+      playChord(currentChord, {
+        velocity: 0.5 + strumVelocity * 0.5, // map to 0.5..1.0
+        direction: direction
+      });
+
+      const dirIcon = direction === "down" ? "⬇" : "⬆";
+      const velPct = Math.round((0.5 + strumVelocity * 0.5) * 100);
+      triggerExpression(`${dirIcon} Strum ${velPct}%`);
+    }
+
+    updateStrumHandUI(`strum-${direction}`);
+  } else {
+    // Show intensity meter based on current speed even when not strumming
+    const intensityRatio = Math.min(1, speed / STRUM_SPEED_THRESHOLD);
+    updateStrumIntensityBar(intensityRatio);
+    updateStrumHandUI("ready");
+  }
+}
+
+/**
+ * Calculate how "open" the palm is (0..1) based on finger spread.
+ */
+function calculatePalmOpenness(lms) {
+  if (!lms || lms.length < 21) return 0;
+
+  const tips = [4, 8, 12, 16, 20]; // thumb, index, middle, ring, pinky tips
+  const wrist = lms[0];
+
+  // Average distance of fingertips from wrist (normalized by hand scale)
+  const middleMcp = lms[9];
+  const handScale = Math.sqrt(
+    Math.pow(middleMcp.x - wrist.x, 2) +
+    Math.pow(middleMcp.y - wrist.y, 2)
+  );
+
+  if (handScale < 0.01) return 0;
+
+  let totalDist = 0;
+  for (const tip of tips) {
+    const dx = lms[tip].x - wrist.x;
+    const dy = lms[tip].y - wrist.y;
+    totalDist += Math.sqrt(dx * dx + dy * dy);
+  }
+
+  const avgDist = totalDist / tips.length;
+  return Math.min(1, avgDist / (handScale * 2.2));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: HAMMER-ON / PULL-OFF EXPRESSION
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Detects chord changes that happen while in two-hand mode without a strum
+ * gesture, interpreting them as hammer-on or pull-off techniques.
+ */
+function processChordExpression(fingerCount, nowMs) {
+  if (!twoHandMode) {
+    prevChordFingerCount = fingerCount;
+    return;
+  }
+
+  // Only trigger when chord changes without a recent strum
+  const timeSinceStrum = nowMs - lastStrumTime;
+
+  if (fingerCount !== prevChordFingerCount && timeSinceStrum > 300 && nowMs > hammerOnCooldown) {
+    const newChord = fingerCount;
+    const oldChord = currentChord;
+
+    if (newChord > 0 && newChord !== oldChord) {
+      // Determine if hammer-on (adding fingers) or pull-off (removing fingers)
+      const isHammer = fingerCount > prevChordFingerCount;
+
+      // Update the chord
+      currentChord = newChord;
+      lastChord = currentChord;
+      candidateChord = currentChord;
+      candidateCount = 0;
+      updateChordUI(currentChord);
+
+      // Play with expression
+      playChord(currentChord, {
+        velocity: 0.6,
+        direction: lastStrumDirection,
+        hammerOn: isHammer,
+        pullOff: !isHammer
+      });
+
+      triggerExpression(isHammer ? "🔨 Hammer-On" : "🎵 Pull-Off");
+      hammerOnCooldown = nowMs + 250; // prevent rapid re-triggers
+    } else if (newChord === 0 && oldChord > 0) {
+      // Pull-off to mute
+      setChord(0);
+      triggerExpression("🎵 Pull-Off → Mute");
+      hammerOnCooldown = nowMs + 250;
+    }
+  }
+
+  prevChordFingerCount = fingerCount;
+}
+
+/**
+ * In two-hand mode, chord changes are only applied from the chord hand.
+ * The strum hand triggers playback separately.
+ */
+function processChordHandCount(count) {
+  if (count === currentChord) {
+    candidateChord = count;
+    candidateCount = 0;
+    return;
+  }
+
+  if (count === candidateChord) {
+    candidateCount++;
+    if (candidateCount >= STABILITY_THRESHOLD) {
+      // In two-hand mode, update chord silently (strum triggers playback)
+      currentChord = candidateChord;
+      lastChord = currentChord;
+      candidateCount = 0;
+      updateChordUI(currentChord);
+    }
+  } else {
+    candidateChord = count;
+    candidateCount = 1;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: FINGERSTYLE ENGINE
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Start a fingerstyle arpeggio pattern for the given chord.
+ */
+function startFingerstyle(chordId) {
+  stopFingerstyle();
+
+  if (chordId <= 0 || !CHORD_CONFIG[chordId]) return;
+
+  const cfg = CHORD_CONFIG[chordId];
+  if (!cfg.freqs || cfg.freqs.length === 0) return;
+
+  fingerstyleState.active = true;
+  fingerstyleState.stepIndex = 0;
+  fingerstyleState.lastChordPlayed = chordId;
+
+  scheduleFingerstyleStep();
+}
+
+function stopFingerstyle() {
+  fingerstyleState.active = false;
+  if (fingerstyleState.timerId) {
+    clearTimeout(fingerstyleState.timerId);
+    fingerstyleState.timerId = null;
+  }
+}
+
+function scheduleFingerstyleStep() {
+  if (!fingerstyleState.active) return;
+  if (currentChord <= 0) {
+    stopFingerstyle();
+    return;
+  }
+
+  const pattern = FINGERSTYLE_PATTERNS[fingerstyleState.patternKey];
+  if (!pattern) return;
+
+  const step = pattern.steps[fingerstyleState.stepIndex];
+  const cfg = CHORD_CONFIG[currentChord];
+  const nStrings = cfg.freqs.length;
+
+  // Clamp string indices to available strings
+  const validStrings = step.strings
+    .map(s => Math.min(s, nStrings - 1))
+    .filter((s, i, arr) => arr.indexOf(s) === i); // deduplicate
+
+  // Play the specific strings as a fingerpick
+  playChord(currentChord, {
+    velocity: fingerstyleState.velocity + (Math.random() * 0.1 - 0.05),
+    direction: "down",
+    fingerpick: true,
+    stringSubset: validStrings
+  });
+
+  // Advance step
+  fingerstyleState.stepIndex = (fingerstyleState.stepIndex + 1) % pattern.steps.length;
+  const nextStep = pattern.steps[fingerstyleState.stepIndex];
+
+  // Schedule next step based on tempo and beat delay
+  const beatDurationMs = (60 / fingerstyleState.tempo) * 1000;
+  const delayMs = nextStep.delay * beatDurationMs;
+
+  fingerstyleState.timerId = setTimeout(() => {
+    scheduleFingerstyleStep();
+  }, Math.max(50, delayMs)); // minimum 50ms between steps
+}
+
+/**
+ * Handle chord changes in fingerstyle mode.
+ */
+function handleFingerstyleChordChange(count) {
+  if (count === currentChord) {
+    candidateChord = count;
+    candidateCount = 0;
+    return;
+  }
+
+  if (count === candidateChord) {
+    candidateCount++;
+    if (candidateCount >= STABILITY_THRESHOLD) {
+      const prevChord = currentChord;
+      currentChord = candidateChord;
+      lastChord = currentChord;
+      candidateCount = 0;
+      updateChordUI(currentChord);
+
+      if (currentChord === 0) {
+        // Mute
+        stopFingerstyle();
+        activeVoices.forEach(voice => voice.fadeAndDispose(0.065));
+      } else if (currentChord !== prevChord) {
+        // Restart pattern with new chord
+        startFingerstyle(currentChord);
+      }
+    }
+  } else {
+    candidateChord = count;
+    candidateCount = 1;
+  }
+}
+
+function setFingerstylePattern(patternKey) {
+  if (!FINGERSTYLE_PATTERNS[patternKey]) return;
+  fingerstyleState.patternKey = patternKey;
+  fingerstyleState.stepIndex = 0;
+
+  // Update UI
+  document.querySelectorAll(".pattern-pill").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.pattern === patternKey);
+  });
+
+  if (fingerstyleState.active && currentChord > 0) {
+    startFingerstyle(currentChord);
+  }
+}
+
+function setFingerstyleTempo(bpm) {
+  fingerstyleState.tempo = Math.max(40, Math.min(240, bpm));
+  const el = document.getElementById("val-tempo");
+  if (el) el.textContent = `${fingerstyleState.tempo} BPM`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: PERFORMANCE RECORDING
+// ═══════════════════════════════════════════════════════════════════════════
+
+function initRecordingDest() {
+  if (recordingDest || !audioCtx || !effectsChain) return;
+  try {
+    recordingDest = audioCtx.createMediaStreamDestination();
+    // Tap off the master gain (post effects, pre-limiter for cleaner capture)
+    effectsChain.masterGain.connect(recordingDest);
+  } catch (err) {
+    console.warn("[Recording] Could not create MediaStreamDestination:", err);
+  }
+}
+
+function startRecording() {
+  ensureAudioCtx();
+  initRecordingDest();
+
+  if (!recordingDest) {
+    showToast("Recording not supported in this browser", "error");
+    return;
+  }
+
+  recordedChunks = [];
+
+  // Determine best MIME type
+  const mimeTypes = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/mp4"
+  ];
+
+  let selectedMime = "";
+  for (const mime of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(mime)) {
+      selectedMime = mime;
+      break;
+    }
+  }
+
+  if (!selectedMime) {
+    showToast("No supported audio recording format found", "error");
+    return;
+  }
+
+  try {
+    mediaRecorder = new MediaRecorder(recordingDest.stream, {
+      mimeType: selectedMime,
+      audioBitsPerSecond: 128000
+    });
+
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data.size > 0) recordedChunks.push(e.data);
+    };
+
+    mediaRecorder.onstop = () => {
+      isRecording = false;
+      updateRecordingUI();
+    };
+
+    mediaRecorder.start(100); // collect data every 100ms
+    isRecording = true;
+    recordingStartTime = Date.now();
+    updateRecordingUI();
+    showToast("🔴 Recording started", "info");
+  } catch (err) {
+    console.error("[Recording] Failed to start:", err);
+    showToast("Failed to start recording", "error");
+  }
+}
+
+function stopRecording() {
+  if (mediaRecorder && isRecording) {
+    mediaRecorder.stop();
+    showToast("⏹ Recording stopped", "info");
+  }
+}
+
+function playRecording() {
+  if (recordedChunks.length === 0) {
+    showToast("No recording to play", "error");
+    return;
+  }
+
+  const blob = new Blob(recordedChunks, { type: recordedChunks[0].type || "audio/webm" });
+  const url = URL.createObjectURL(blob);
+  const audio = new Audio(url);
+  audio.play();
+
+  audio.onended = () => URL.revokeObjectURL(url);
+  showToast("▶ Playing recording…", "info");
+}
+
+function downloadRecording() {
+  if (recordedChunks.length === 0) {
+    showToast("No recording to download", "error");
+    return;
+  }
+
+  const mimeType = recordedChunks[0].type || "audio/webm";
+  const blob = new Blob(recordedChunks, { type: mimeType });
+  const url = URL.createObjectURL(blob);
+
+  const ext = mimeType.includes("webm") ? "webm"
+    : mimeType.includes("ogg") ? "ogg"
+    : mimeType.includes("mp4") ? "mp4" : "webm";
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `gesture-guitar-${new Date().toISOString().slice(0, 19).replace(/[:.]/g, "-")}.${ext}`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  showToast("💾 Recording downloaded", "info");
+}
+
+function toggleRecording() {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    startRecording();
+  }
+}
+
+function updateRecordingUI() {
+  const recBtn = document.getElementById("btn-record");
+  const recDot = document.getElementById("rec-dot");
+  const recLabel = document.getElementById("rec-label");
+  const playBtn = document.getElementById("btn-play-recording");
+  const dlBtn = document.getElementById("btn-download-recording");
+
+  if (recBtn) recBtn.classList.toggle("recording", isRecording);
+  if (recDot) recDot.classList.toggle("active", isRecording);
+  if (recLabel) recLabel.textContent = isRecording ? "Stop" : "Record";
+
+  const hasRecording = recordedChunks.length > 0 && !isRecording;
+  if (playBtn) playBtn.style.display = hasRecording ? "" : "none";
+  if (dlBtn)   dlBtn.style.display   = hasRecording ? "" : "none";
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: EXPRESSION DISPLAY
+// ═══════════════════════════════════════════════════════════════════════════
+function triggerExpression(label) {
+  expressionLabel = label;
+  expressionFade = 1.0;
+
+  const el = document.getElementById("expression-label");
+  if (el) {
+    el.textContent = label;
+    el.classList.remove("fade-out");
+    el.classList.add("active");
+    // Trigger reflow for animation reset
+    void el.offsetWidth;
+    setTimeout(() => {
+      el.classList.add("fade-out");
+      setTimeout(() => el.classList.remove("active", "fade-out"), 600);
+    }, 800);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FINGER ANALYSIS (shared between chord hand analysis)
+// ═══════════════════════════════════════════════════════════════════════════
 
 /**
  * Smart 3D Finger Classifier — 3D Orientation-Invariant & Scale-Normalized
@@ -1130,7 +1999,29 @@ function setChord(id, immediate = false) {
   lastChord = currentChord;
   candidateChord = currentChord;
   candidateCount = 0;
-  playChord(currentChord);
+
+  if (playingMode === "classic") {
+    // Classic mode: auto-play on chord change
+    if (!twoHandMode || immediate) {
+      playChord(currentChord);
+    }
+  } else if (playingMode === "two-hand") {
+    // Two-hand: only play if triggered by button (immediate)
+    if (immediate) {
+      playChord(currentChord);
+    }
+  } else if (playingMode === "fingerstyle") {
+    if (immediate) {
+      // Manual trigger from UI button
+      if (currentChord > 0) {
+        startFingerstyle(currentChord);
+      } else {
+        stopFingerstyle();
+        activeVoices.forEach(voice => voice.fadeAndDispose(0.065));
+      }
+    }
+  }
+
   updateChordUI(currentChord);
 }
 
@@ -1175,6 +2066,115 @@ function drawSkeleton(lms) {
     outputCtx.fillStyle = isTip ? "#ffffff" : color;
     outputCtx.shadowBlur = isTip ? 18 : 6;
     outputCtx.fill();
+  }
+
+  outputCtx.shadowBlur = 0;
+}
+
+/**
+ * Stage 3: Draw two hand skeletons with distinct visual styles.
+ * Chord hand = warm color (chord color), Strum hand = cyan/electric blue
+ */
+function drawDualHandSkeleton(chordLms, strumLms) {
+  const W = outputCanvas.width;
+  const H = outputCanvas.height;
+  const chordColor = CHORD_CONFIG[currentChord].color;
+  const strumColor = "#22d3ee"; // cyan for strum hand
+
+  const px = (lm) => [(1 - lm.x) * W, lm.y * H];
+
+  // Draw chord hand
+  if (chordLms) {
+    outputCtx.lineWidth   = 3.5;
+    outputCtx.strokeStyle = chordColor;
+    outputCtx.shadowColor = chordColor;
+    outputCtx.shadowBlur  = 10;
+
+    for (const [i, j] of HAND_CONNECTIONS) {
+      const [x1, y1] = px(chordLms[i]);
+      const [x2, y2] = px(chordLms[j]);
+      outputCtx.beginPath();
+      outputCtx.moveTo(x1, y1);
+      outputCtx.lineTo(x2, y2);
+      outputCtx.stroke();
+    }
+
+    for (let k = 0; k < chordLms.length; k++) {
+      const [x, y] = px(chordLms[k]);
+      const isTip = [4,8,12,16,20].includes(k);
+      outputCtx.beginPath();
+      outputCtx.arc(x, y, isTip ? 7 : 3.5, 0, 2 * Math.PI);
+      outputCtx.fillStyle = isTip ? "#ffffff" : chordColor;
+      outputCtx.shadowBlur = isTip ? 18 : 6;
+      outputCtx.fill();
+    }
+
+    // Draw "CHORD" label near wrist
+    const [wx, wy] = px(chordLms[0]);
+    outputCtx.shadowBlur = 0;
+    outputCtx.font = "bold 11px 'Outfit', sans-serif";
+    outputCtx.fillStyle = chordColor;
+    outputCtx.textAlign = "center";
+    outputCtx.fillText("CHORD", wx, wy + 22);
+  }
+
+  // Draw strum hand
+  if (strumLms) {
+    outputCtx.lineWidth   = 2.5;
+    outputCtx.strokeStyle = strumColor;
+    outputCtx.shadowColor = strumColor;
+    outputCtx.shadowBlur  = 8;
+
+    // Draw strum trail (motion path)
+    if (strumHistory.length >= 3) {
+      outputCtx.lineWidth = 2;
+      outputCtx.strokeStyle = `${strumColor}80`;
+      outputCtx.shadowBlur = 4;
+      outputCtx.beginPath();
+      for (let i = 0; i < strumHistory.length; i++) {
+        const sx = (1 - strumHistory[i].x) * W;
+        const sy = strumHistory[i].y * H;
+        if (i === 0) outputCtx.moveTo(sx, sy);
+        else outputCtx.lineTo(sx, sy);
+      }
+      outputCtx.stroke();
+    }
+
+    // Draw connections with dashed style for strum hand
+    outputCtx.lineWidth = 2.5;
+    outputCtx.strokeStyle = strumColor;
+    outputCtx.shadowBlur = 8;
+    outputCtx.setLineDash([6, 3]);
+
+    for (const [i, j] of HAND_CONNECTIONS) {
+      const [x1, y1] = px(strumLms[i]);
+      const [x2, y2] = px(strumLms[j]);
+      outputCtx.beginPath();
+      outputCtx.moveTo(x1, y1);
+      outputCtx.lineTo(x2, y2);
+      outputCtx.stroke();
+    }
+
+    outputCtx.setLineDash([]);
+
+    for (let k = 0; k < strumLms.length; k++) {
+      const [x, y] = px(strumLms[k]);
+      const isTip = [4,8,12,16,20].includes(k);
+      outputCtx.beginPath();
+      outputCtx.arc(x, y, isTip ? 6 : 3, 0, 2 * Math.PI);
+      outputCtx.fillStyle = isTip ? "#ffffff" : strumColor;
+      outputCtx.shadowBlur = isTip ? 14 : 5;
+      outputCtx.fill();
+    }
+
+    // Draw label near wrist
+    const [wx, wy] = px(strumLms[0]);
+    outputCtx.shadowBlur = 0;
+    outputCtx.font = "bold 11px 'Outfit', sans-serif";
+    outputCtx.fillStyle = strumColor;
+    outputCtx.textAlign = "center";
+    const strumLabel = playingMode === "fingerstyle" ? "PICKING" : "STRUM";
+    outputCtx.fillText(strumLabel, wx, wy + 22);
   }
 
   outputCtx.shadowBlur = 0;
@@ -1283,6 +2283,86 @@ function updateFingerPills(states) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: HAND MODE, STRUM & INTENSITY UI UPDATES
+// ═══════════════════════════════════════════════════════════════════════════
+function updateHandModeUI() {
+  const modeEl = document.getElementById("hand-mode-badge");
+  const strumStatusEl = document.getElementById("strum-status");
+
+  if (modeEl) {
+    if (twoHandMode) {
+      modeEl.textContent = "✌ Two Hands Detected";
+      modeEl.classList.add("active");
+    } else {
+      modeEl.textContent = "☝ Single Hand";
+      modeEl.classList.remove("active");
+    }
+  }
+
+  // Show strum direction indicator
+  const dirEl = document.getElementById("strum-direction-indicator");
+  if (dirEl) {
+    if (twoHandMode && playingMode === "two-hand") {
+      dirEl.style.display = "";
+    } else {
+      dirEl.style.display = "none";
+    }
+  }
+}
+
+function updateStrumHandUI(state) {
+  const el = document.getElementById("strum-status");
+  if (!el) return;
+
+  switch (state) {
+    case "palm-mute":
+      el.textContent = "🤚 Palm Mute";
+      el.className = "strum-status palm-mute";
+      break;
+    case "strum-down":
+      el.textContent = "⬇ Down Strum";
+      el.className = "strum-status strum-active";
+      break;
+    case "strum-up":
+      el.textContent = "⬆ Up Strum";
+      el.className = "strum-status strum-active";
+      break;
+    default:
+      el.textContent = "🎸 Ready";
+      el.className = "strum-status";
+      break;
+  }
+
+  // Update direction indicator
+  const dirEl = document.getElementById("strum-direction-indicator");
+  if (dirEl) {
+    if (state === "strum-down") {
+      dirEl.textContent = "⬇";
+      dirEl.className = "strum-dir-icon down";
+    } else if (state === "strum-up") {
+      dirEl.textContent = "⬆";
+      dirEl.className = "strum-dir-icon up";
+    }
+  }
+}
+
+function updateStrumIntensityBar(ratio) {
+  const barEl = document.getElementById("strum-intensity-fill");
+  if (!barEl) return;
+  const pct = Math.round(ratio * 100);
+  barEl.style.width = `${pct}%`;
+
+  // Color gradient: blue -> cyan -> yellow -> red
+  if (ratio < 0.3) {
+    barEl.style.background = "var(--accent-d)";
+  } else if (ratio < 0.7) {
+    barEl.style.background = "var(--accent-strum)";
+  } else {
+    barEl.style.background = "linear-gradient(90deg, var(--accent-strum), var(--accent-am))";
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // VOICE COMMANDS
 // ═══════════════════════════════════════════════════════════════════════════
 function setupVoice() {
@@ -1338,6 +2418,24 @@ function showToast(msg, type = "info") {
   document.body.appendChild(t);
   setTimeout(() => t.classList.add("show"), 10);
   setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 400); }, 4000);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// STAGE 3: HAND ROLE CONFIGURATION
+// ═══════════════════════════════════════════════════════════════════════════
+function swapHandRoles() {
+  const temp = preferredChordLabel;
+  preferredChordLabel = preferredStrumLabel;
+  preferredStrumLabel = temp;
+
+  const labelEl = document.getElementById("hand-config-label");
+  if (labelEl) {
+    const chordSide = preferredChordLabel === "Right" ? "Left hand" : "Right hand";
+    const strumSide = preferredStrumLabel === "Right" ? "Left hand" : "Right hand";
+    labelEl.textContent = `Chord: ${chordSide} · Strum: ${strumSide}`;
+  }
+
+  showToast("Hand roles swapped", "info");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1456,6 +2554,59 @@ function bindUI() {
     });
   }
 
+  // ── Stage 3: Playing Mode Pills ──
+  document.querySelectorAll(".mode-pill").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      ensureAudioCtx();
+      setPlayingMode(btn.dataset.mode);
+    });
+  });
+
+  // ── Stage 3: Hand Role Swap ──
+  const swapBtn = document.getElementById("btn-swap-hands");
+  if (swapBtn) swapBtn.addEventListener("click", swapHandRoles);
+
+  // ── Stage 3: Fingerstyle Pattern Pills ──
+  document.querySelectorAll(".pattern-pill").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      ensureAudioCtx();
+      setFingerstylePattern(btn.dataset.pattern);
+    });
+  });
+
+  // ── Stage 3: Fingerstyle Tempo Slider ──
+  const slTempo = document.getElementById("slider-tempo");
+  if (slTempo) {
+    slTempo.addEventListener("input", (e) => {
+      setFingerstyleTempo(parseInt(e.target.value));
+    });
+  }
+
+  // ── Stage 3: Recording Buttons ──
+  const recBtn = document.getElementById("btn-record");
+  if (recBtn) recBtn.addEventListener("click", toggleRecording);
+
+  const playRecBtn = document.getElementById("btn-play-recording");
+  if (playRecBtn) playRecBtn.addEventListener("click", playRecording);
+
+  const dlRecBtn = document.getElementById("btn-download-recording");
+  if (dlRecBtn) dlRecBtn.addEventListener("click", downloadRecording);
+
+  // ── Stage 3: Collapse Playing Mode Panel ──
+  const modeCollapseBtn = document.getElementById("btn-collapse-modes");
+  const modeHeaderToggle = document.getElementById("modes-header-toggle");
+  const modesPanel = document.getElementById("playing-modes-panel");
+  if (modeHeaderToggle && modesPanel) {
+    modeHeaderToggle.addEventListener("click", (e) => {
+      modesPanel.classList.toggle("collapsed");
+      const isExpanded = !modesPanel.classList.contains("collapsed");
+      if (modeCollapseBtn) modeCollapseBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+    });
+  }
+
+  // Keyboard shortcuts
   window.addEventListener("keydown", (e) => {
     if (e.ctrlKey || e.altKey || e.metaKey) return;
     const k = e.key.toLowerCase();
@@ -1466,5 +2617,6 @@ function bindUI() {
     else if (k === "5" || k === "g") setChord(5, true);
     else if (k === "0" || k === "q" || k === "m") setChord(0, true);
     else if (k === "v") toggleVoice();
+    else if (k === "r") toggleRecording();
   });
 }

@@ -17,7 +17,7 @@
     <div class="logo">
       <span class="logo-icon">🎸</span>
       <h1>Gesture Guitar</h1>
-      <span class="version-badge">Mobile &amp; Web</span>
+      <span class="version-badge">Stage 3</span>
     </div>
     <div class="header-controls">
       <button id="btn-camera-flip" class="icon-button" title="Flip Camera" aria-label="Flip Camera">
@@ -43,18 +43,34 @@
 
       <!-- Glass Overlay HUD Top Bar -->
       <div class="hud-top-bar">
-        <div class="finger-indicators">
-          <div class="finger-pill" id="pill-thumb" data-finger="T">T</div>
-          <div class="finger-pill" id="pill-index" data-finger="I">I</div>
-          <div class="finger-pill" id="pill-middle" data-finger="M">M</div>
-          <div class="finger-pill" id="pill-ring" data-finger="R">R</div>
-          <div class="finger-pill" id="pill-pinky" data-finger="P">P</div>
+        <div class="hud-left-group">
+          <div class="finger-indicators">
+            <div class="finger-pill" id="pill-thumb" data-finger="T">T</div>
+            <div class="finger-pill" id="pill-index" data-finger="I">I</div>
+            <div class="finger-pill" id="pill-middle" data-finger="M">M</div>
+            <div class="finger-pill" id="pill-ring" data-finger="R">R</div>
+            <div class="finger-pill" id="pill-pinky" data-finger="P">P</div>
+          </div>
+          <!-- Stage 3: Hand Mode & Expression Indicators -->
+          <div class="expression-hud">
+            <span class="hand-mode-badge" id="hand-mode-badge">☝ Single Hand</span>
+            <span class="strum-status" id="strum-status">🎸 Ready</span>
+            <span class="expression-label" id="expression-label"></span>
+          </div>
+          <!-- Stage 3: Strum intensity bar -->
+          <div class="strum-intensity-bar-container" id="strum-intensity-container">
+            <div class="strum-intensity-fill" id="strum-intensity-fill"></div>
+          </div>
         </div>
 
-        <div class="active-chord-badge" id="chord-badge">
-          <span class="chord-label-sub">CURRENT CHORD</span>
-          <span class="chord-label-main" id="chord-display-name">Mute</span>
-          <span class="chord-count-pill" id="finger-count-pill">0 Fingers</span>
+        <div class="hud-right-group">
+          <div class="active-chord-badge" id="chord-badge">
+            <span class="chord-label-sub">CURRENT CHORD</span>
+            <span class="chord-label-main" id="chord-display-name">Mute</span>
+            <span class="chord-count-pill" id="finger-count-pill">0 Fingers</span>
+          </div>
+          <!-- Stage 3: Strum direction indicator -->
+          <div class="strum-dir-icon" id="strum-direction-indicator" style="display:none;">⬇</div>
         </div>
       </div>
 
@@ -70,14 +86,110 @@
       </div>
 
       <!-- Camera Start Prompt inside Stage when inactive -->
-      <!-- FIXED: starts hidden; only shown after model is ready -->
       <div id="camera-prompt" class="stage-overlay hidden">
         <div class="prompt-icon">📷</div>
         <h2>Allow Camera Access</h2>
-        <p>Hold up 1 to 5 fingers in front of your front camera to play guitar chords in real-time!</p>
+        <p>Use one hand for chords (1-5 fingers) or both hands for expressive two-hand playing — chord hand + strum hand!</p>
         <button id="btn-start-prompt" class="btn-primary btn-large" type="button">Tap to Enable Camera</button>
       </div>
     </div>
+
+    <!-- ── Stage 3: Playing Modes & Expression Panel ── -->
+    <section class="playing-modes-panel" id="playing-modes-panel" aria-label="Playing Modes &amp; Expression">
+      <div class="studio-header" id="modes-header-toggle">
+        <div class="studio-title-group">
+          <span class="studio-icon">🎵</span>
+          <div>
+            <h3>Playing Modes &amp; Expression</h3>
+            <span class="studio-subtitle">Select how you want to play the guitar</span>
+          </div>
+        </div>
+        <div class="studio-header-actions">
+          <!-- Recording controls -->
+          <div class="recording-controls" id="recording-section">
+            <button id="btn-record" class="rec-pill-btn" type="button" title="Record Performance">
+              <span class="rec-dot" id="rec-dot"></span>
+              <span id="rec-label">Record</span>
+            </button>
+            <button id="btn-play-recording" class="rec-action-btn" type="button" title="Play Recording" style="display:none;">▶</button>
+            <button id="btn-download-recording" class="rec-action-btn" type="button" title="Download Recording" style="display:none;">💾</button>
+          </div>
+          <button id="btn-collapse-modes" class="collapse-btn" type="button" aria-expanded="true" aria-label="Toggle Playing Modes Panel">
+            <span class="collapse-icon">▾</span>
+          </button>
+        </div>
+      </div>
+
+      <div class="studio-body" id="modes-body">
+        <!-- Playing Mode Selector Pills -->
+        <div class="presets-container">
+          <span class="control-label">Playing Mode</span>
+          <div class="modes-grid" role="radiogroup" aria-label="Playing Modes">
+            <button class="mode-pill active" data-mode="classic" type="button" role="radio" aria-checked="true">
+              <span class="mode-icon">☝</span>
+              <span class="preset-info">
+                <span class="preset-name">Classic</span>
+                <span class="preset-tag">Auto-strum on gesture</span>
+              </span>
+            </button>
+            <button class="mode-pill" data-mode="two-hand" type="button" role="radio" aria-checked="false">
+              <span class="mode-icon">✌</span>
+              <span class="preset-info">
+                <span class="preset-name">Two-Hand</span>
+                <span class="preset-tag">Chord + strum control</span>
+              </span>
+            </button>
+            <button class="mode-pill" data-mode="fingerstyle" type="button" role="radio" aria-checked="false">
+              <span class="mode-icon">🤌</span>
+              <span class="preset-info">
+                <span class="preset-name">Fingerstyle</span>
+                <span class="preset-tag">Arpeggio patterns</span>
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Two-Hand: Hand Role Config (shown only in two-hand mode) -->
+        <div class="hand-config-row" id="hand-config-row" style="display:none;">
+          <span class="control-label">Hand Assignment</span>
+          <div class="hand-config-inner">
+            <span class="hand-config-text" id="hand-config-label">Chord: Left hand · Strum: Right hand</span>
+            <button class="swap-hands-btn" id="btn-swap-hands" type="button" title="Swap hand roles">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
+              Swap
+            </button>
+          </div>
+        </div>
+
+        <!-- Fingerstyle: Pattern & Tempo Config (shown only in fingerstyle mode) -->
+        <div class="fingerstyle-config-row" id="fingerstyle-config-row" style="display:none;">
+          <div class="presets-container">
+            <span class="control-label">Picking Pattern</span>
+            <div class="patterns-grid">
+              <button class="pattern-pill active" data-pattern="travis" type="button">
+                <span class="preset-name">Travis Pick</span>
+              </button>
+              <button class="pattern-pill" data-pattern="arpeggio" type="button">
+                <span class="preset-name">Arpeggio</span>
+              </button>
+              <button class="pattern-pill" data-pattern="classical" type="button">
+                <span class="preset-name">Classical</span>
+              </button>
+              <button class="pattern-pill" data-pattern="waltz" type="button">
+                <span class="preset-name">Waltz</span>
+              </button>
+            </div>
+          </div>
+          <div class="slider-control">
+            <div class="slider-label-row">
+              <label for="slider-tempo">Tempo</label>
+              <span class="slider-val" id="val-tempo">120 BPM</span>
+            </div>
+            <input type="range" id="slider-tempo" min="40" max="240" value="120" step="5" aria-label="Fingerstyle Tempo">
+          </div>
+        </div>
+      </div>
+    </section>
 
     <!-- ── Sound Settings & Effects Studio (Stage 2) ── -->
     <section class="sound-studio-panel" id="sound-studio-panel" aria-label="Sound Settings &amp; Effects">
@@ -217,14 +329,43 @@
 
       <!-- Quick Guide Accordion / Help -->
       <div class="guide-card">
-        <h3>&#x1F590; Hand Gesture Mapping</h3>
+        <h3>&#x1F590; Playing Modes</h3>
         <div class="guide-table">
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">☝ Classic Mode</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">auto-strum</span>
+          </div>
           <div class="guide-row"><span class="g-fingers">&#x270A; Fist (0)</span><span class="g-chord">Mute</span><span class="g-voice">"stop" / "mute"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x261D; 1 Finger</span><span class="g-chord">Em (E Minor)</span><span class="g-voice">"e minor" / "1"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x270C; 2 Fingers</span><span class="g-chord">Am (A Minor)</span><span class="g-voice">"a minor" / "2"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F91F; 3 Fingers</span><span class="g-chord">C Major</span><span class="g-voice">"c major" / "3"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F596; 4 Fingers</span><span class="g-chord">D Major</span><span class="g-voice">"d major" / "4"</span></div>
           <div class="guide-row"><span class="g-fingers">&#x1F590; 5 Fingers</span><span class="g-chord">G Major</span><span class="g-voice">"g major" / "5"</span></div>
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">✌ Two-Hand Mode</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">expressive</span>
+          </div>
+          <div class="guide-row"><span class="g-fingers">Left hand</span><span class="g-chord">Chord fingers</span><span class="g-voice">select chord</span></div>
+          <div class="guide-row"><span class="g-fingers">Right hand ↕</span><span class="g-chord">Strum motion</span><span class="g-voice">velocity strum</span></div>
+          <div class="guide-row"><span class="g-fingers">Right palm 🤚</span><span class="g-chord">Palm Mute</span><span class="g-voice">instant damp</span></div>
+          <div class="guide-row"><span class="g-fingers">Add fingers</span><span class="g-chord">Hammer-On 🔨</span><span class="g-voice">legato add</span></div>
+          <div class="guide-row"><span class="g-fingers">Remove fingers</span><span class="g-chord">Pull-Off 🎵</span><span class="g-voice">legato release</span></div>
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">🤌 Fingerstyle Mode</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">arpeggios</span>
+          </div>
+          <div class="guide-row"><span class="g-fingers">Gesture chord</span><span class="g-chord">Auto-pick pattern</span><span class="g-voice">musical sequence</span></div>
+          <div class="guide-row"><span class="g-fingers">Choose pattern</span><span class="g-chord">Travis / Arpeggio / etc</span><span class="g-voice">select style</span></div>
+          <div class="guide-row guide-section-header">
+            <span class="g-fingers">🔴 Recording</span>
+            <span class="g-chord"></span>
+            <span class="g-voice">capture</span>
+          </div>
+          <div class="guide-row"><span class="g-fingers">R key / button</span><span class="g-chord">Start/Stop</span><span class="g-voice">toggle record</span></div>
+          <div class="guide-row"><span class="g-fingers">After stopping</span><span class="g-chord">▶ Play / 💾 Download</span><span class="g-voice">review & save</span></div>
         </div>
       </div>
     </section>
